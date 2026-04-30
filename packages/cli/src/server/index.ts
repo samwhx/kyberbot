@@ -72,7 +72,8 @@ export async function startServer(options: {
       }
 
       if (identity.channels?.whatsapp?.enabled) {
-        const whatsapp = new WhatsAppChannel(root);
+        const ownerJid = identity.channels.whatsapp.owner_jid || null;
+        const whatsapp = new WhatsAppChannel(root, ownerJid);
         await whatsapp.start();
         channels.push(whatsapp);
       }
@@ -87,25 +88,41 @@ export async function startServer(options: {
   const server = http.createServer(app);
 
   return new Promise((resolve, reject) => {
+    // Fail fast if no API token is configured. authMiddleware no longer
+    // falls through to "open" mode, so a missing token would 401 every
+    // request — surface the cause at startup instead.
+    try {
+      getApiToken();
+    } catch (err) {
+      reject(err);
+      return;
+    }
+
+    // Default to localhost-only. Tailscale users should leave this as 127.0.0.1
+    // and front the agent with `tailscale serve`, which proxies tailnet traffic
+    // to the local port. Set KYBERBOT_BIND_HOST=0.0.0.0 only if you understand
+    // the LAN/internet exposure and have other controls in place.
+    const host = process.env.KYBERBOT_BIND_HOST || '127.0.0.1';
+
     server.on('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'EADDRINUSE') {
-        logger.error(`Port ${port} is already in use. Another agent or process is running on this port.`);
-        reject(new Error(`Port ${port} is already in use. Stop the other agent first, or change server.port in identity.yaml.`));
+        logger.error(`Port ${port} is already in use on ${host}. Another agent or process is running.`);
+        reject(new Error(`Port ${port} is already in use on ${host}. Stop the other agent first, or change server.port in identity.yaml.`));
       } else {
         reject(error);
       }
     });
 
-    server.listen(port, () => {
-      logger.info(`Server listening on port ${port}`);
-
-      if (process.env.KYBERBOT_API_TOKEN) {
-        logger.info('API authentication enabled');
-      } else {
-        logger.warn('API authentication DISABLED — brain endpoints are publicly accessible on this network. Set KYBERBOT_API_TOKEN in .env to secure them.');
+    server.listen(port, host, () => {
+      logger.info(`Server listening on ${host}:${port}`);
+      logger.info('API authentication enabled');
+      if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+        logger.warn(
+          `Server is bound to ${host} — reachable beyond localhost. ` +
+          `Ensure firewall/Tailscale ACLs are configured.`
+        );
       }
-
-      logger.info(`Web UI: http://localhost:${port}/ui`);
+      logger.info(`Web UI: http://${host === '0.0.0.0' ? 'localhost' : host}:${port}/ui`);
 
       resolve({
         stop: async () => {

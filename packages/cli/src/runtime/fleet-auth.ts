@@ -31,29 +31,36 @@ export function createFleetAuthMiddleware(
   agents: Map<string, { root: string; apiToken: string }>
 ): (req: Request, res: Response, next: NextFunction) => void {
   return (req: Request, res: Response, next: NextFunction) => {
-    // No token configured anywhere — allow all (development mode)
     if (agents.size === 0) {
-      return next();
+      // Misconfiguration: fleet middleware mounted with no agents. Refuse all.
+      res.status(503).json({ error: 'Service Unavailable', message: 'No agents configured' });
+      return;
+    }
+
+    // Refuse to fall through to no-auth mode under any circumstance. If any
+    // agent has no API token in its .env, the route 503s — operator must fix.
+    const missingToken = [...agents.entries()].filter(([, a]) => !a.apiToken);
+    if (missingToken.length > 0) {
+      logger.error(
+        `Fleet auth: agents missing API tokens: ${missingToken.map(([n]) => n).join(', ')}. ` +
+        "Set KYBERBOT_API_TOKEN in each agent's .env (openssl rand -hex 32)."
+      );
+      res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'Agent authentication is not configured',
+      });
+      return;
     }
 
     const token = extractBearerToken(req);
-
-    // Check if token matches any agent
     if (token) {
       for (const [name, agent] of agents) {
         if (token === agent.apiToken) {
-          // Attach agent context to request
           (req as any).agentName = name;
           (req as any).agentRoot = agent.root;
           return next();
         }
       }
-    }
-
-    // No valid token — check if any agent requires auth
-    const anyTokenRequired = [...agents.values()].some(a => a.apiToken);
-    if (!anyTokenRequired) {
-      return next();
     }
 
     // Auth failed

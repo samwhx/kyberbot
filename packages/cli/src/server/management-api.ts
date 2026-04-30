@@ -6,8 +6,8 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { readFileSync, writeFileSync, statSync, existsSync, readdirSync } from 'fs';
-import { join } from 'path';
+import { readFileSync, writeFileSync, statSync, existsSync, readdirSync, realpathSync } from 'fs';
+import { join, resolve as resolvePath, sep } from 'path';
 import { spawn } from 'node:child_process';
 import yaml from 'js-yaml';
 import { getClaudeModel } from '../config.js';
@@ -657,17 +657,54 @@ export function createManagementRouter(channels: Channel[], root: string): Route
     }
   });
 
-  // POST /brain-notes/read — Read a note file by full path
+  // POST /brain-notes/read — Read a note file by full path.
+  // Path is constrained to: agent root, the agent's Claude Code memory dir.
+  // Without this containment, callers could read any file the node process can
+  // open (e.g. ~/.ssh/id_ed25519, /etc/passwd).
   router.post('/brain-notes/read', (req, res) => {
     try {
       const { path: filePath } = req.body;
-      if (!filePath || !existsSync(filePath)) {
+      if (!filePath || typeof filePath !== 'string') {
+        res.status(400).json({ error: 'path is required' });
+        return;
+      }
+
+      const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+      const claudeMemoryDir = join(
+        homeDir,
+        '.claude',
+        'projects',
+        `-Users-${process.env.USER || 'user'}-${root.split('/').pop()}`,
+        'memory'
+      );
+
+      const safeRealpath = (p: string): string => {
+        try { return realpathSync(p); } catch { return resolvePath(p); }
+      };
+      const allowedRoots = [safeRealpath(root), safeRealpath(claudeMemoryDir)];
+
+      const absPath = resolvePath(filePath);
+      if (!existsSync(absPath)) {
         res.status(404).json({ error: 'Note not found' });
         return;
       }
-      const content = readFileSync(filePath, 'utf-8');
-      const stat = statSync(filePath);
-      res.json({ name: filePath.split('/').pop(), content, lastModified: stat.mtime.toISOString() });
+      const realPath = safeRealpath(absPath);
+      const isContained = allowedRoots.some(
+        (allowed) => realPath === allowed || realPath.startsWith(allowed + sep)
+      );
+      if (!isContained) {
+        logger.warn('brain-notes/read denied: path outside allowed roots', { filePath, realPath });
+        res.status(403).json({ error: 'Path not allowed' });
+        return;
+      }
+
+      const content = readFileSync(realPath, 'utf-8');
+      const stat = statSync(realPath);
+      res.json({
+        name: realPath.split('/').pop(),
+        content,
+        lastModified: stat.mtime.toISOString(),
+      });
     } catch (err) {
       logger.error('Failed to read brain note', { error: String(err) });
       res.status(500).json({ error: 'Failed to read brain note' });

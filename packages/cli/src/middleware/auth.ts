@@ -22,15 +22,22 @@ export function getApiToken(): string {
 
   const envToken = process.env.KYBERBOT_API_TOKEN;
   if (envToken) {
+    if (envToken.length < 32) {
+      throw new Error(
+        'KYBERBOT_API_TOKEN is too short (<32 chars). Generate a strong token with `openssl rand -hex 32`.'
+      );
+    }
     apiToken = envToken;
     logger.info('Using API token from environment');
     return apiToken;
   }
 
-  apiToken = randomUUID();
-  logger.info('Generated new API token (set KYBERBOT_API_TOKEN to persist)');
-
-  return apiToken;
+  // Refuse to invent a token. A randomly-generated, never-printed token gives
+  // the illusion of auth without authenticating anyone — fail loudly instead.
+  throw new Error(
+    'KYBERBOT_API_TOKEN is not set. Generate one with `openssl rand -hex 32` and add it to .env. ' +
+    'The server refuses to start without authentication.'
+  );
 }
 
 export function validateToken(token: string): boolean {
@@ -54,12 +61,6 @@ export function authMiddleware(
   res: Response,
   next: NextFunction
 ): void {
-  const envToken = process.env.KYBERBOT_API_TOKEN;
-  if (!envToken) {
-    next();
-    return;
-  }
-
   const authHeader = req.headers.authorization;
 
   if (!authHeader) {

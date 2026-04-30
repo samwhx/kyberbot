@@ -32,8 +32,7 @@
     },
     "auditConfig": {
       "ignoreCves": [
-        "GHSA-c2c7-rcm5-vvqj",
-        "GHSA-37ch-88jc-xwx2"
+        "GHSA-c2c7-rcm5-vvqj"
       ]
     },
     "onlyBuiltDependencies": [

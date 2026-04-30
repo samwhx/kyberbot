@@ -192,6 +192,8 @@ export async function runWorkerHeartbeat(
         cwd: root,
         model: getHeartbeatModelForRoot(root),
         onChunk: (chunk) => appendRunLog(runId, chunk),
+        // Same rationale as services/heartbeat: trusted-but-injectable.
+        tools: 'broad',
       });
 
       // Step 3.5: Auto-detect created files from the response and register as artifacts.

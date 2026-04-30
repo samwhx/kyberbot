@@ -20,6 +20,30 @@ export interface Message {
   content: string;
 }
 
+/**
+ * Tool-access policy for a Claude subprocess invocation.
+ *
+ * Every subprocess used to run with --dangerously-skip-permissions, which
+ * meant a single prompt-injection from a Telegram message could trigger
+ * arbitrary Bash. The policy decides what tools the spawned process may
+ * use; --dangerously-skip-permissions is now reserved for 'owner'.
+ *
+ * - 'none': no tools at all — pure text generation. Use for brain
+ *   extractors, summarizers, classifiers — anything that should not touch
+ *   the filesystem or network.
+ * - 'narrow': read-only — Read, Glob, Grep, WebFetch, WebSearch, Skill.
+ *   Default. Safe for peer-agent / brain-search callers that may legitimately
+ *   look things up but should never write or exec.
+ * - 'broad': narrow + Write, Edit, NotebookEdit, Bash(kyberbot:*). For
+ *   trusted-but-potentially-injected paths (channel handlers, heartbeat)
+ *   that need to update memory or run kyberbot CLI subcommands. Arbitrary
+ *   Bash and Agent tools are still blocked.
+ * - 'owner': full tool access via --dangerously-skip-permissions. Reserve
+ *   for owner-initiated CLI sessions and `kyberbot agent spawn` where the
+ *   human operator is driving directly.
+ */
+export type ToolPolicy = 'none' | 'narrow' | 'broad' | 'owner';
+
 export interface CompleteOptions {
   model?: 'haiku' | 'sonnet' | 'opus';
   system?: string;
@@ -45,7 +69,20 @@ export interface CompleteOptions {
    * agent's root here. Only used by subprocess mode.
    */
   cwd?: string;
+  /**
+   * Tool access policy. Defaults to 'narrow' (read-only) — safer than the
+   * previous always-skip-permissions behavior. Pass 'broad' for channel
+   * handlers and heartbeat, 'none' for pure-text brain ops, 'owner' only
+   * for genuinely owner-driven invocations.
+   */
+  tools?: ToolPolicy;
 }
+
+const TOOL_POLICY_ALLOWLIST: Record<Exclude<ToolPolicy, 'owner'>, string> = {
+  none: '',
+  narrow: 'Read,Glob,Grep,WebFetch,WebSearch,Skill',
+  broad: 'Read,Glob,Grep,WebFetch,WebSearch,Skill,Write,Edit,NotebookEdit,Bash(kyberbot:*)',
+};
 
 // Model ID mapping
 const MODEL_IDS: Record<string, string> = {
@@ -160,7 +197,23 @@ export class ClaudeClient {
       // Use stream-json format when onChunk is provided for live output
       const useStreamJson = !!opts.onChunk;
       const args = ['--print', '-'];
-      args.push('--dangerously-skip-permissions'); // Always skip — subprocesses are headless, no human to prompt
+
+      // Tool policy. Default 'narrow' (read-only) — was 'owner' (skip-perms),
+      // which made every channel/heartbeat/brain invocation a one-shot RCE
+      // surface via prompt injection. See ToolPolicy doc.
+      const policy: ToolPolicy = opts.tools ?? 'narrow';
+      if (policy === 'owner') {
+        args.push('--dangerously-skip-permissions');
+      } else {
+        const allowed = TOOL_POLICY_ALLOWLIST[policy];
+        if (allowed) {
+          args.push('--allowedTools', allowed);
+        }
+        // For 'none' we pass nothing — Claude Code in --print mode without
+        // skip-permissions denies any tool that needs permission, so the
+        // model produces pure text.
+      }
+
       if (useStreamJson) {
         args.push('--output-format', 'stream-json', '--verbose');
       }

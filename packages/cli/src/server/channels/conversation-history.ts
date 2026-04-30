@@ -47,6 +47,11 @@ export function pushAssistantMessage(conversationId: string, content: string): v
 /**
  * Build a prompt that includes conversation history before the current message.
  * Returns the full prompt string to pass to the Agent SDK.
+ *
+ * User content is fenced inside <user_message> tags and assistant content in
+ * <assistant_message> tags. The system prompt instructs the model to treat
+ * tag contents as data, not instructions — partial mitigation for prompt
+ * injection from messaging channels. (See server/channels/system-prompt.ts.)
  */
 export function buildPromptWithHistory(conversationId: string, currentMessage: string): string {
   const history = getOrCreateHistory(conversationId);
@@ -55,25 +60,35 @@ export function buildPromptWithHistory(conversationId: string, currentMessage: s
   const cutoff = Date.now() - MAX_AGE_MS;
   const recent = history.filter(e => e.timestamp >= cutoff);
 
-  if (recent.length === 0) {
-    return currentMessage;
-  }
-
   const lines: string[] = [];
-  lines.push('--- Conversation history (most recent messages) ---');
-  for (const entry of recent) {
-    const label = entry.role === 'user' ? 'User' : 'Assistant';
-    // Truncate long assistant responses in history to save context
-    const content = entry.role === 'assistant' && entry.content.length > 500
-      ? entry.content.slice(0, 497) + '...'
-      : entry.content;
-    lines.push(`${label}: ${content}`);
+  if (recent.length > 0) {
+    lines.push('<conversation_history>');
+    for (const entry of recent) {
+      const tag = entry.role === 'user' ? 'user_message' : 'assistant_message';
+      // Truncate long assistant responses in history to save context
+      const content = entry.role === 'assistant' && entry.content.length > 500
+        ? entry.content.slice(0, 497) + '...'
+        : entry.content;
+      lines.push(`<${tag}>${escapeForXml(content)}</${tag}>`);
+    }
+    lines.push('</conversation_history>');
+    lines.push('');
   }
-  lines.push('--- End of history ---');
-  lines.push('');
-  lines.push(`User: ${currentMessage}`);
+  lines.push(`<user_message>${escapeForXml(currentMessage)}</user_message>`);
 
   return lines.join('\n');
+}
+
+/**
+ * Escape characters that would let user content close the surrounding tag.
+ * Conservative — replace `<`, `>`, and `&` with their entity forms in user
+ * input. Claude's tokenizer reads the entities fine.
+ */
+function escapeForXml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 /**

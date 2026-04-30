@@ -339,6 +339,10 @@ export async function runCeoHeartbeat(root: string, agentName: string): Promise<
       cwd: root,
       model: getHeartbeatModelForRoot(root),
       onChunk: (chunk) => appendRunLog(runId, chunk),
+      // CEO heartbeat is part of the persistence-injection chain (orchestration
+      // state can be influenced by peer-agent bus messages). Block arbitrary
+      // Bash/Agent; allow memory edits and `kyberbot` CLI subcommands.
+      tools: 'broad',
       system: [
         `You are ${agentName}, the CEO orchestrator for this company.`,
         'You coordinate a team of AI agents to achieve company goals.',

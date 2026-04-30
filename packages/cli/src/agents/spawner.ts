@@ -37,6 +37,9 @@ export async function spawnAgent(name: string, prompt: string): Promise<AgentSpa
     system: systemPrompt,
     maxTurns: agent.maxTurns,
     subprocess: true,
+    // Sub-agents are spawned by the owner (via `kyberbot agent spawn` or
+    // management API behind mandatory token), so full tool access is OK.
+    tools: 'owner',
   };
 
   logger.info(`Spawning agent: ${name}`, { model: agent.model, maxTurns: agent.maxTurns });

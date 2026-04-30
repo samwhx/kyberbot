@@ -298,9 +298,14 @@ async function tick(root: string): Promise<void> {
       subprocess: true,
       cwd: root,
       model: getHeartbeatModelForRoot(root),
+      // HEARTBEAT.md is influenced by self-edits driven by channel messages,
+      // so this path is "trusted but injectable." 'broad' allows memory edits
+      // and kyberbot CLI commands but blocks arbitrary Bash/Agent. If a task
+      // legitimately needs other shell commands, define a skill that wraps it.
+      tools: 'broad',
       system: [
         'You are a heartbeat task executor for a KyberBot agent.',
-        'You have full tool access — you can run Bash commands, read/write files, and make HTTP requests.',
+        'Tool access is restricted: Read/Write/Edit/Glob/Grep/WebFetch/WebSearch/Skill, plus `kyberbot ...` Bash commands. Arbitrary shell commands are blocked.',
         'When a task references a **Skill**, follow the skill instructions exactly as written.',
         'Execute only the single most overdue task, then stop.',
         'If nothing needs attention, reply HEARTBEAT_OK.',

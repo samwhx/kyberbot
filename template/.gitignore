@@ -8,3 +8,12 @@ logs/
 *.db-wal
 *.db-shm
 .DS_Store
+
+# identity.yaml holds bot tokens and channel config. `kyberbot backup` does
+# `git add -A` and pushes — without this rule the Telegram bot_token leaks
+# to the backup repo. Treat identity.yaml as a local-only secret. To restore
+# on a new device, re-run `kyberbot onboard` and re-add channels.
+identity.yaml
+
+# WhatsApp session credentials — full account-takeover material if leaked.
+data/whatsapp-auth/

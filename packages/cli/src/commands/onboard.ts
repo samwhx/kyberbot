@@ -584,7 +584,15 @@ export function createOnboardCommand(): Command {
       const envPath = join(root, '.env');
       if (!existsSync(envPath)) {
         writeFileSync(envPath, envLines.join('\n'));
-        console.log(chalk.green('  + .env'));
+        // chmod 0600 — .env holds the API token and OpenAI/Anthropic keys.
+        // Default umask leaves it 0644 (world-readable) on a multi-user host.
+        try {
+          const { chmodSync } = await import('node:fs');
+          chmodSync(envPath, 0o600);
+        } catch (err) {
+          console.log(chalk.yellow(`  ! could not chmod 0600 .env: ${String(err)}`));
+        }
+        console.log(chalk.green('  + .env (chmod 0600)'));
       } else {
         console.log(chalk.dim('  . .env (already exists, skipped)'));
       }

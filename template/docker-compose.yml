@@ -5,7 +5,9 @@ services:
     image: chromadb/chroma:latest
     container_name: kyberbot-chromadb
     ports:
-      - "8001:8000"
+      # Bind to localhost only. ChromaDB has no auth — exposing it on the LAN
+      # (or via Tailscale without ACLs) lets anyone read/write the vector store.
+      - "127.0.0.1:8001:8000"
     volumes:
       - ./data/chromadb:/chroma/chroma
     environment:

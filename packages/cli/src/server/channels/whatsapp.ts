@@ -3,6 +3,21 @@
  *
  * Uses @whiskeysockets/baileys to connect to WhatsApp Web.
  * Routes incoming messages to the agent via claude.ts.
+ *
+ * Security: WhatsApp messages can come from anyone who knows the linked
+ * number. The channel REFUSES to start without an owner_jid configured,
+ * and silently drops every message that does not come from that JID.
+ *
+ * To set up:
+ *   1. Add `channels.whatsapp.owner_jid: "<your-number>@s.whatsapp.net"`
+ *      to identity.yaml (the `s.whatsapp.net` suffix is the WhatsApp
+ *      personal-number format; group JIDs end with `@g.us`).
+ *   2. Set `channels.whatsapp.enabled: true`.
+ *   3. Start the agent and scan the QR.
+ *   4. Send a message to yourself from the linked account to test.
+ *
+ * No verification flow exists (unlike Telegram /start CODE). The owner_jid
+ * is the trust anchor — set it manually before enabling the channel.
  */
 
 import { createLogger } from '../../logger.js';
@@ -21,9 +36,16 @@ export class WhatsAppChannel implements Channel {
   private connected = false;
   private messageHandler: ((message: ChannelMessage) => Promise<void>) | null = null;
 
-  constructor(private root: string) {}
+  constructor(private root: string, private ownerJid: string | null = null) {}
 
   async start(): Promise<void> {
+    if (!this.ownerJid) {
+      throw new Error(
+        'WhatsApp channel refuses to start without owner_jid configured. ' +
+        'Add `channels.whatsapp.owner_jid: "<your-number>@s.whatsapp.net"` to identity.yaml. ' +
+        'Without it, anyone who messages the linked number reaches the agent.'
+      );
+    }
     try {
       const baileys = await import('@whiskeysockets/baileys');
       const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = baileys;
@@ -58,6 +80,13 @@ export class WhatsAppChannel implements Channel {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
+        // Hard owner-JID check — drop everything else silently.
+        const senderJid = msg.key.remoteJid;
+        if (senderJid !== this.ownerJid) {
+          logger.debug(`Ignored WhatsApp message from non-owner JID ${senderJid}`);
+          return;
+        }
+
         const text = msg.message.conversation ||
           msg.message.extendedTextMessage?.text || '';
 
@@ -88,6 +117,10 @@ export class WhatsAppChannel implements Channel {
               maxTurns: 30,
               subprocess: true,
               cwd: this.root,
+              // WhatsApp messages are untrusted (and currently have weak
+              // sender verification — see channels/whatsapp.ts head comment).
+              // 'broad' blocks arbitrary Bash/Agent so injection can't RCE.
+              tools: 'broad',
             });
 
             // Track both sides in history

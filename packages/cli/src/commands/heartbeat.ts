@@ -232,7 +232,8 @@ export function createHeartbeatCommand(): Command {
       try {
         const client = getClaudeClient();
         const result = await client.complete(prompt, {
-          system: 'You are a heartbeat scheduler. Execute the most overdue task from HEARTBEAT.md. Return HEARTBEAT_OK if nothing needs attention.',
+          system: 'You are a heartbeat scheduler. Execute the most overdue task from HEARTBEAT.md. Return HEARTBEAT_OK if nothing needs attention. Tool access: Read/Write/Edit/Glob/Grep/WebFetch/WebSearch/Skill, plus `kyberbot ...` Bash. No arbitrary shell.',
+          tools: 'broad',
         });
 
         if (result.trim() === 'HEARTBEAT_OK') {

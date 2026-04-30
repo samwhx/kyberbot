@@ -5,6 +5,23 @@ interface MarkdownRendererProps {
   content: string;
 }
 
+/**
+ * Only allow http(s) and mailto for rendered links. Without this,
+ * `[click me](javascript:alert(token))` or `data:` / `file:` URIs
+ * embedded in Claude's output (or in stored conversation text the
+ * model surfaces back) execute in the user's browser context.
+ */
+function safeHref(href: string | undefined): string | undefined {
+  if (!href) return undefined;
+  const trimmed = href.trim();
+  // Reject anything that looks like javascript:, data:, file:, vbscript:, etc.
+  // Allowlist-only on the protocol prefix.
+  if (/^(https?:|mailto:|\/|#|\.\/|\.\.\/)/i.test(trimmed)) {
+    return trimmed;
+  }
+  return undefined;
+}
+
 export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
   return (
     <div
@@ -20,11 +37,23 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
           ul: ({ children }) => <ul className="my-2 ml-4 list-disc">{children}</ul>,
           ol: ({ children }) => <ol className="my-2 ml-4 list-decimal">{children}</ol>,
           li: ({ children }) => <li className="my-0.5">{children}</li>,
-          a: ({ href, children }) => (
-            <a href={href} className="text-cyan-600 dark:text-cyan-400 hover:underline" target="_blank" rel="noopener noreferrer">
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) => {
+            const safe = safeHref(href);
+            if (!safe) {
+              // Render as plain text — never let unsafe URIs become clickable.
+              return <span className="text-slate-700 dark:text-white/80">{children}</span>;
+            }
+            return (
+              <a
+                href={safe}
+                className="text-cyan-600 dark:text-cyan-400 hover:underline"
+                target="_blank"
+                rel="noopener noreferrer nofollow"
+              >
+                {children}
+              </a>
+            );
+          },
           h1: ({ children }) => <h1 className="text-lg font-semibold text-slate-900 dark:text-white mt-4 mb-2">{children}</h1>,
           h2: ({ children }) => <h2 className="text-base font-semibold text-slate-900 dark:text-white mt-3 mb-2">{children}</h2>,
           h3: ({ children }) => <h3 className="text-sm font-semibold text-slate-900 dark:text-white mt-2 mb-1">{children}</h3>,

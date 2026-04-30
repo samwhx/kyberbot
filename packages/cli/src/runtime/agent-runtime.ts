@@ -110,7 +110,8 @@ export class AgentRuntime {
       }
 
       if (this.identity.channels?.whatsapp?.enabled) {
-        const whatsapp = new WhatsAppChannel(this.root);
+        const ownerJid = this.identity.channels.whatsapp.owner_jid || null;
+        const whatsapp = new WhatsAppChannel(this.root, ownerJid);
         await whatsapp.start();
         this.channels.push(whatsapp);
       }

@@ -19,7 +19,7 @@ function TokenPrompt({ onSubmit }: { onSubmit: (token: string) => void }) {
         className="text-sm text-slate-500 dark:text-white/50 mb-6 max-w-sm text-center"
         style={{ fontFamily: 'Inter, system-ui, sans-serif', fontWeight: 300 }}
       >
-        Paste your KYBERBOT_API_TOKEN to connect. You can also visit this page with <code className="text-[11px] bg-slate-200 dark:bg-white/10 px-1 py-0.5 rounded font-mono">?token=...</code> in the URL.
+        Paste your KYBERBOT_API_TOKEN to connect. Run <code className="text-[11px] bg-slate-200 dark:bg-white/10 px-1 py-0.5 rounded font-mono">kyberbot token</code> in your agent directory to get it.
       </p>
       <div className="flex gap-3">
         <input
@@ -48,16 +48,15 @@ export default function App() {
   const [checked, setChecked] = useState(false);
 
   useEffect(() => {
-    // Check for token in URL params (set on first visit)
+    // Tokens via ?token=... were removed: the URL is logged by access logs,
+    // browser history, referer headers, ngrok/Tailscale logs, etc. If a stale
+    // ?token=... is in the URL, strip it without using it (so refreshing the
+    // tab can't keep leaking it through the address bar).
     const params = new URLSearchParams(window.location.search);
-    const urlToken = params.get('token');
-    if (urlToken) {
-      sessionStorage.setItem('kyberbot_token', urlToken);
+    if (params.has('token')) {
       window.history.replaceState({}, '', window.location.pathname);
-      setToken(urlToken);
-    } else {
-      setToken(sessionStorage.getItem('kyberbot_token'));
     }
+    setToken(sessionStorage.getItem('kyberbot_token'));
     setChecked(true);
   }, []);
 

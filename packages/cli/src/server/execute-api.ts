@@ -19,7 +19,7 @@ function sendLine(res: Response, obj: Record<string, unknown>) {
 }
 
 export async function executeHandler(req: Request, res: Response) {
-  const { prompt, config, env: reqEnv } = req.body ?? {};
+  const { prompt, config } = req.body ?? {};
 
   // Validate
   if (!prompt || typeof prompt !== 'string') {
@@ -46,15 +46,10 @@ export async function executeHandler(req: Request, res: Response) {
   if (cfg.sessionId) args.push('--resume', String(cfg.sessionId));
   args.push('--dangerously-skip-permissions'); // Always skip — subprocesses are headless
 
-  // Build environment - merge request env vars
+  // Caller-supplied env was removed: it allowed PATH/LD_PRELOAD/NODE_OPTIONS
+  // injection from any authenticated client. The subprocess inherits the
+  // server's environment unchanged.
   const childEnv: Record<string, string> = { ...process.env } as Record<string, string>;
-  if (reqEnv && typeof reqEnv === 'object') {
-    for (const [key, value] of Object.entries(reqEnv)) {
-      if (typeof value === 'string') {
-        childEnv[key] = value;
-      }
-    }
-  }
 
   logger.info(`Executing claude in ${cwd} with ${args.length} args`);
 

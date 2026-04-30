@@ -14,7 +14,7 @@
 import { Bot } from 'grammy';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { randomBytes } from 'crypto';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import yaml from 'js-yaml';
 import { createLogger } from '../../logger.js';
 import { getClaudeClient } from '../../claude.js';
@@ -31,6 +31,12 @@ export interface TelegramConfig {
   owner_chat_id?: number;
 }
 
+// Per-chatId rate limit on verification attempts.
+// 24-bit codes were brute-forceable; even with 128-bit codes a flood-bot can
+// be a DoS vector, so cap attempts cheaply.
+const MAX_VERIFY_ATTEMPTS = 5;
+const VERIFY_LOCKOUT_MS = 10 * 60 * 1000; // 10 min
+
 export class TelegramChannel implements Channel {
   readonly name = 'telegram';
   private bot: Bot | null = null;
@@ -38,6 +44,7 @@ export class TelegramChannel implements Channel {
   private messageHandler: ((message: ChannelMessage) => Promise<void>) | null = null;
   private verificationCode: string | null = null;
   private ownerChatId: number | null;
+  private verifyAttempts = new Map<number, { count: number; firstAt: number }>();
 
   constructor(private config: TelegramConfig, private root: string) {
     this.ownerChatId = config.owner_chat_id ?? null;
@@ -48,13 +55,15 @@ export class TelegramChannel implements Channel {
 
     // If no owner set, enter verification mode
     if (!this.ownerChatId) {
-      this.verificationCode = randomBytes(3).toString('hex').toUpperCase();
+      // 32 hex chars = 128 bits of entropy. The previous 6-hex (24-bit) code
+      // was brute-forceable in hours via the public Telegram bot API.
+      this.verificationCode = randomBytes(16).toString('hex');
       logger.info('─────────────────────────────────────────────');
       logger.info(`Telegram verification required`);
       logger.info(`Send /start ${this.verificationCode} to your bot`);
       logger.info('─────────────────────────────────────────────');
       console.log('');
-      console.log(`  🔐 Telegram verification code: ${this.verificationCode}`);
+      console.log(`  Telegram verification code: ${this.verificationCode}`);
       console.log(`  Send /start ${this.verificationCode} to your bot in Telegram`);
       console.log('');
     }
@@ -68,11 +77,26 @@ export class TelegramChannel implements Channel {
       if (this.verificationCode) {
         // Only handle /start CODE during verification
         if (text.startsWith('/start ')) {
+          // Rate-limit verification attempts per chatId. Without this a
+          // flood-bot can grind attempts even against a 128-bit code.
+          const now = Date.now();
+          const entry = this.verifyAttempts.get(chatId);
+          if (entry && now - entry.firstAt < VERIFY_LOCKOUT_MS && entry.count >= MAX_VERIFY_ATTEMPTS) {
+            logger.warn(`Verification locked out for chat_id=${chatId} until ${new Date(entry.firstAt + VERIFY_LOCKOUT_MS).toISOString()}`);
+            return;
+          }
+
           const code = text.slice(7).trim();
-          if (code === this.verificationCode) {
-            // Verification successful
+          // Constant-time comparison — defense-in-depth even though 128 bits
+          // makes timing-side-channel impractical here.
+          const codeBuf = Buffer.from(code);
+          const expectBuf = Buffer.from(this.verificationCode);
+          const match = codeBuf.length === expectBuf.length && timingSafeEqual(codeBuf, expectBuf);
+
+          if (match) {
             this.ownerChatId = chatId;
             this.verificationCode = null;
+            this.verifyAttempts.clear();
             this.saveOwnerChatId(chatId);
             logger.info(`Owner verified: chat_id=${chatId}`);
 
@@ -81,8 +105,14 @@ export class TelegramChannel implements Channel {
             await ctx.reply(`Connected! You are now the verified owner.\n\n${greeting}`);
             return;
           }
-          // Wrong code — silently ignore
-          logger.warn(`Invalid verification attempt from chat_id=${chatId}`);
+
+          // Wrong code — track attempt, silently ignore
+          if (!entry || now - entry.firstAt >= VERIFY_LOCKOUT_MS) {
+            this.verifyAttempts.set(chatId, { count: 1, firstAt: now });
+          } else {
+            entry.count += 1;
+          }
+          logger.warn(`Invalid verification attempt from chat_id=${chatId} (${this.verifyAttempts.get(chatId)?.count}/${MAX_VERIFY_ATTEMPTS})`);
           return;
         }
         // Not a /start command during verification — ignore
@@ -127,7 +157,16 @@ export class TelegramChannel implements Channel {
           const client = getClaudeClient();
           const prompt = buildPromptWithHistory(convoId, text);
           const systemPrompt = await buildChannelSystemPrompt('telegram');
-          const reply = await client.complete(prompt, { system: systemPrompt, maxTurns: 30, subprocess: true, cwd: this.root });
+          const reply = await client.complete(prompt, {
+            system: systemPrompt,
+            maxTurns: 30,
+            subprocess: true,
+            cwd: this.root,
+            // Telegram messages reach Claude as untrusted text. 'broad' allows
+            // memory edits and `kyberbot` CLI commands but blocks arbitrary
+            // Bash and Agent — so a prompt-injected message can't shell-exec.
+            tools: 'broad',
+          });
 
           // Track both sides in history
           pushUserMessage(convoId, text);

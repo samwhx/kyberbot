@@ -83,18 +83,21 @@ function buildPromptFromSession(cwd: string, sessionId: string, currentMessage: 
       return currentMessage;
     }
 
+    const escape = (t: string) =>
+      t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
     const lines: string[] = [];
-    lines.push('--- Conversation history (this session) ---');
+    lines.push('<conversation_history>');
     for (const entry of recent) {
-      const label = entry.role === 'user' ? 'User' : 'Assistant';
+      const tag = entry.role === 'user' ? 'user_message' : 'assistant_message';
       const content = entry.content.length > 1500
         ? entry.content.slice(0, 1497) + '...'
         : entry.content;
-      lines.push(`${label}: ${content}`);
+      lines.push(`<${tag}>${escape(content)}</${tag}>`);
     }
-    lines.push('--- End of history ---');
+    lines.push('</conversation_history>');
     lines.push('');
-    lines.push(`User: ${currentMessage}`);
+    lines.push(`<user_message>${escape(currentMessage)}</user_message>`);
 
     return lines.join('\n');
   } catch (err) {

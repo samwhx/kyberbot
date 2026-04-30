@@ -49,7 +49,15 @@ export interface IdentityConfig {
       bot_token: string;
       owner_chat_id?: number;
     };
-    whatsapp?: { enabled: boolean };
+    whatsapp?: {
+      enabled: boolean;
+      /**
+       * WhatsApp JID of the verified owner. The channel REFUSES to start
+       * without this. Format: `<phone>@s.whatsapp.net` (personal) or
+       * `<groupId>@g.us` (group). Set manually in identity.yaml.
+       */
+      owner_jid?: string;
+    };
   };
   kybernesis?: {
     agent_id: string;

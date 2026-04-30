@@ -120,6 +120,17 @@ export class FleetManager {
       authMap.set(name, { root: agent.root, apiToken: agent.apiToken });
     }
 
+    // Refuse to start fleet if any agent is missing an API token. With auth
+    // fallthrough removed in fleet-auth.ts, an unconfigured agent would 503
+    // forever — surface it at startup instead.
+    const missingTokens = [...authMap.entries()].filter(([, a]) => !a.apiToken).map(([n]) => n);
+    if (missingTokens.length > 0) {
+      throw new Error(
+        `Agents missing KYBERBOT_API_TOKEN in their .env: ${missingTokens.join(', ')}. ` +
+        `Generate one with \`openssl rand -hex 32\` and set it in each agent's .env before starting fleet.`
+      );
+    }
+
     // Create Express server
     this.app = express();
     this.app.use(express.json());
@@ -301,12 +312,21 @@ export class FleetManager {
     // Error middleware
     this.app.use(errorMiddleware);
 
-    // Start server
+    // Start server. Bind to localhost by default — Tailscale users should front
+    // with `tailscale serve`. Set KYBERBOT_BIND_HOST to override.
+    const bindHost = process.env.KYBERBOT_BIND_HOST || '127.0.0.1';
     this.server = http.createServer(this.app);
     await new Promise<void>((resolve) => {
-      this.server!.listen(port, () => {
-        logger.info(`Fleet server listening on port ${port}`);
+      this.server!.listen(port, bindHost, () => {
+        logger.info(`Fleet server listening on ${bindHost}:${port}`);
         logger.info(`Agents: ${[...this.agents.keys()].join(', ')}`);
+
+        if (bindHost !== '127.0.0.1' && bindHost !== 'localhost' && bindHost !== '::1') {
+          logger.warn(
+            `Fleet server bound to ${bindHost} — reachable beyond localhost. ` +
+            `Ensure firewall/Tailscale ACLs are configured.`
+          );
+        }
 
         if (this.agents.size === 1) {
           logger.info('Single-agent mode — root routes available');
@@ -361,8 +381,8 @@ export class FleetManager {
         agentApp.use(errorMiddleware);
 
         const agentServer = http.createServer(agentApp);
-        agentServer.listen(agentPort, () => {
-          logger.info(`Agent ${name} also listening on port ${agentPort}`);
+        agentServer.listen(agentPort, bindHost, () => {
+          logger.info(`Agent ${name} also listening on ${bindHost}:${agentPort}`);
         });
         this.agentServers.push(agentServer);
       } catch (error) {
