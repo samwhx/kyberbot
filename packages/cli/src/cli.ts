@@ -15,7 +15,6 @@
  *   kyberbot heartbeat     # Heartbeat tasks (list, status, run)
  *   kyberbot skill         # Skill lifecycle (list, create, remove, setup)
  *   kyberbot channel       # Messaging channels (list, add, remove, status)
- *   kyberbot tunnel        # Manage ngrok tunnel (setup, start, status)
  *   kyberbot status        # Service health dashboard
  *   kyberbot update        # Update CLI source and refresh agent templates
  *   kyberbot eval          # Evaluate memory system quality
@@ -48,9 +47,7 @@ import { createAgentCommand } from './commands/agent.js';
 import { createChannelCommand } from './commands/channel.js';
 import { createStatusCommand } from './commands/status.js';
 import { createUpdateCommand } from './commands/update.js';
-import { createKybernesisCommand } from './commands/kybernesis.js';
 import { createTokenCommand } from './commands/token.js';
-import { createTunnelCommand } from './commands/tunnel.js';
 import { createBackupCommand } from './commands/backup.js';
 import { createEvalCommand } from './commands/eval.js';
 import { createPinCommand, createUnpinCommand, createPinnedCommand } from './commands/pin.js';
@@ -105,9 +102,7 @@ program.addCommand(createHeartbeatCommand());
 program.addCommand(createSkillCommand());
 program.addCommand(createAgentCommand());
 program.addCommand(createChannelCommand());
-program.addCommand(createKybernesisCommand());
 program.addCommand(createTokenCommand());
-program.addCommand(createTunnelCommand());
 program.addCommand(createBackupCommand());
 program.addCommand(createEvalCommand());
 program.addCommand(createPinCommand());

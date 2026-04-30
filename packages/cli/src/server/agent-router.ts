@@ -16,7 +16,6 @@ import { createManagementRouter } from './management-api.js';
 import { createBusApiRouter } from './bus-api.js';
 import { createArpRouter } from './arp/router.js';
 import { chatSseHandler } from './chat-sse.js';
-import { executeHandler } from './execute-api.js';
 import { Channel } from './channels/types.js';
 import { createLogger } from '../logger.js';
 
@@ -60,9 +59,6 @@ export function createAgentRouter(root: string, channels: Channel[]): Router {
 
   // Brain API
   router.use('/brain', createBrainRouter(root));
-
-  // Execute API
-  router.post('/api/execute', executeHandler);
 
   // Chat SSE — must be before the web router
   router.post('/api/web/chat', (req, res) => chatSseHandler(req, res, root));

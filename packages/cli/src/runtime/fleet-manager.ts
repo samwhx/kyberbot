@@ -17,8 +17,6 @@ import { AgentBus, setActiveBus } from './agent-bus.js';
 import { FleetSleepScheduler } from './fleet-sleep-scheduler.js';
 import { createFleetAuthMiddleware } from './fleet-auth.js';
 import { getMetrics, errorMiddleware } from '../monitoring.js';
-import { startTunnel, getTunnelUrl } from '../services/tunnel.js';
-import { ServiceHandle } from '../types.js';
 import { mountWebUi } from '../server/agent-router.js';
 import { createOrchestrationRouter } from '../server/orchestration-api.js';
 
@@ -30,7 +28,6 @@ export class FleetManager {
   private app: express.Express | null = null;
   private sleepScheduler: FleetSleepScheduler | null = null;
   private agentServers: http.Server[] = [];
-  private tunnelHandles = new Map<string, ServiceHandle>();
   private bus: AgentBus;
   private startedAt = 0;
 
@@ -196,7 +193,6 @@ export class FleetManager {
                 { name: 'Heartbeat', status: s.services.heartbeat },
                 { name: 'Sleep Agent', status: this.sleepScheduler?.isRunning() ? 'running' : 'disabled' },
                 { name: 'Channels', status: s.services.channels.length > 0 ? 'running' : 'disabled' },
-                { name: 'Tunnel', status: this.tunnelHandles.has(s.name) ? 'running' : (this.agents.get(s.name)?.identity.tunnel?.enabled ? 'stopped' : 'disabled') },
               ],
               channels: s.services.channels,
             })),
@@ -361,7 +357,6 @@ export class FleetManager {
               { name: 'Heartbeat', status: s.services.heartbeat },
               { name: 'Sleep Agent', status: this.sleepScheduler?.isRunning() ? 'running' : 'disabled' },
               { name: 'Channels', status: s.services.channels.length > 0 ? 'running' : 'disabled' },
-              { name: 'Tunnel', status: this.tunnelHandles.has(name) ? 'running' : (agent.identity.tunnel?.enabled ? 'stopped' : 'disabled') },
             ],
             errors: 0,
             memory: {},
@@ -390,47 +385,8 @@ export class FleetManager {
       }
     }
 
-    // Start tunnels for agents that have them configured
-    for (const [name, agent] of this.agents) {
-      if (!agent.identity.tunnel?.enabled) continue;
-      const tunnelPort = agent.identity.server?.port || port;
-      try {
-        const handle = await startTunnel(tunnelPort);
-        this.tunnelHandles.set(name, handle);
-        const url = getTunnelUrl();
-        logger.info(`Tunnel started for ${name}`, { port: tunnelPort, url });
-      } catch (error) {
-        logger.warn(`Tunnel failed for ${name}`, { error: String(error) });
-      }
-      // Only start one tunnel at a time (ngrok free tier limitation)
-      // Future: support multiple tunnels with paid ngrok
-      break;
-    }
-
-    // Register fleet connection with remote agents (so they can send bus messages back)
-    const fleetTunnelUrl = getTunnelUrl();
-    if (fleetTunnelUrl && this.bus.getRemoteAgentNames().length > 0) {
-      const firstLocalAgent = [...this.agents.values()][0];
-      const fleetToken = firstLocalAgent?.apiToken || '';
-
-      for (const remoteName of this.bus.getRemoteAgentNames()) {
-        const remote = this.bus.getRemoteAgentConfig(remoteName);
-        if (!remote) continue;
-        try {
-          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-          if (remote.apiToken) headers['Authorization'] = `Bearer ${remote.apiToken}`;
-          await fetch(`${remote.baseUrl}/api/bus/register-fleet`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({ fleetUrl: fleetTunnelUrl, fleetToken }),
-            signal: AbortSignal.timeout(10_000),
-          });
-          logger.info(`Fleet registered with remote agent ${remoteName}`, { fleetUrl: fleetTunnelUrl });
-        } catch (error) {
-          logger.warn(`Failed to register fleet with ${remoteName}`, { error: String(error) });
-        }
-      }
-    }
+    // (Tunnel + remote-fleet registration removed in this fork — Tailscale
+    // handles cross-device reach, no public ingress needed.)
 
     // Start sleep scheduler
     const sleepRoots = new Map<string, string>();
@@ -495,12 +451,6 @@ export class FleetManager {
         logger.error(`Failed to stop agent ${name}`, { error: String(error) });
       }
     }
-
-    // Stop tunnels
-    for (const [name, handle] of this.tunnelHandles) {
-      try { await handle.stop(); } catch {}
-    }
-    this.tunnelHandles.clear();
 
     // Stop per-agent servers
     for (const agentServer of this.agentServers) {

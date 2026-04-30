@@ -238,8 +238,6 @@ export function createFleetCommand(): Command {
 
       const { displayBanner } = await import('../splash.js');
       const { getIdentityForRoot } = await import('../config.js');
-      const { getTunnelUrl } = await import('../services/tunnel.js');
-      let tunnelUrl: string | null = null;
 
       console.clear();
       console.log();
@@ -274,7 +272,6 @@ export function createFleetCommand(): Command {
       }
 
       // Per-agent status breakdown
-      tunnelUrl = getTunnelUrl();
       const statuses = fleet.getAllStatuses();
       console.log();
       for (const status of statuses) {
@@ -294,7 +291,6 @@ export function createFleetCommand(): Command {
 
         const icon = status.status === 'running' ? chalk.green('✓') : chalk.red('✗');
         const channels = status.services.channels.map(c => c.name).join(', ') || 'none';
-        const hasTunnel = agentIdentity?.tunnel?.enabled;
 
         console.log(`  ${icon} ${ACCENT(status.name.toUpperCase())}`);
         console.log(`    ${DIM('Status:')}    ${status.status === 'running' ? chalk.green('running') : chalk.red(status.status)}`);
@@ -302,9 +298,6 @@ export function createFleetCommand(): Command {
         console.log(`    ${DIM('Channels:')}  ${channels}`);
         console.log(`    ${DIM('Local:')}     http://localhost:${agentPort}`);
         console.log(`    ${DIM('Web UI:')}    http://localhost:${agentPort}/ui`);
-        if (hasTunnel && tunnelUrl) {
-          console.log(`    ${DIM('Tunnel:')}    ${ACCENT(tunnelUrl)}`);
-        }
         if (agentToken) {
           console.log(`    ${DIM('API Key:')}   ${agentToken}`);
         }

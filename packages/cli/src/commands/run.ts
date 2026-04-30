@@ -36,7 +36,6 @@ import {
   displayConnectionInfo,
   displayShutdownMessage,
 } from '../splash.js';
-import { startTunnel, getTunnelUrl } from '../services/tunnel.js';
 
 const logger = createLogger('cli');
 
@@ -234,10 +233,6 @@ export function createRunCommand(): Command {
           },
         });
 
-        // ─────────────────────────────────────────────────────────────
-        // Service 6: Tunnel (optional ngrok tunnel)
-        // ─────────────────────────────────────────────────────────────
-
         const identity = getIdentity();
 
         // ─────────────────────────────────────────────────────────────
@@ -293,13 +288,6 @@ export function createRunCommand(): Command {
           }
         }
 
-        const tunnelEnabled = identity.tunnel?.enabled === true;
-        registerService({
-          name: 'Tunnel',
-          enabled: tunnelEnabled,
-          start: async () => startTunnel(getServerPort()),
-        });
-
         // ─────────────────────────────────────────────────────────────
         // Start all registered services
         // ─────────────────────────────────────────────────────────────
@@ -325,7 +313,6 @@ export function createRunCommand(): Command {
         displayConnectionInfo({
           port: getServerPort(),
           apiToken: process.env.KYBERBOT_API_TOKEN || undefined,
-          tunnelUrl: getTunnelUrl() || undefined,
         });
 
         // ─────────────────────────────────────────────────────────────

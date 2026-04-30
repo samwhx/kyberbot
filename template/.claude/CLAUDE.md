@@ -216,34 +216,6 @@ Messaging channels and heartbeat conversations are automatically stored in the K
 
 Continue to update USER.md and SOUL.md directly when structured personal or identity information changes — the skills complement those files, they don't replace them.
 
-<!-- BEGIN_KYBERNESIS -->
-### Kybernesis Cloud
-
-I also have cloud workspace memory that persists across devices and sessions.
-
-**IMPORTANT**: ALWAYS query Kybernesis Cloud when the user asks about something.
-Do not skip it just because local memory is empty — Kybernesis Cloud is the
-primary knowledge source, especially for a new agent. Run the command and
-use whatever it returns.
-
-**How to query:**
-```bash
-kyberbot kybernesis query "What do you know about X?"
-kyberbot kybernesis query "project roadmap" --limit 100  # More results
-kyberbot kybernesis list                    # Browse all memories
-kyberbot kybernesis list --limit 100        # More memories
-kyberbot kybernesis status                  # Check if connected
-```
-
-**When to query:**
-- When the user asks about any person, project, company, or topic
-- At the start of a new session, to restore context
-- When you need background on decisions, history, or relationships
-- Whenever local memory has no results — always check cloud before saying "I don't know"
-
-Combine cloud results with local results when both have information.
-<!-- END_KYBERNESIS -->
-
 ## Self-Update
 
 When the user asks to update KyberBot (e.g. "update yourself", "get the latest version", "kyberbot update"):
@@ -458,15 +430,3 @@ kyberbot orch activity                      # Recent activity log
 ```
 
 Use these to check assignments, see what peers are working on, and track shared goals.
-
-<!-- BEGIN_KYBERNESIS -->
-### Kybernesis Cloud
-
-```bash
-kyberbot kybernesis query "..."           # Search cloud memory
-kyberbot kybernesis query "..." --limit N # More results
-kyberbot kybernesis list                  # Browse all cloud memories
-kyberbot kybernesis list --limit N --offset N  # Paginate
-kyberbot kybernesis status               # Cloud connection status
-```
-<!-- END_KYBERNESIS -->

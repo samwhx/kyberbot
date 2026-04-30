@@ -59,14 +59,6 @@ export interface IdentityConfig {
       owner_jid?: string;
     };
   };
-  kybernesis?: {
-    agent_id: string;
-    workspace_id: string;
-  };
-  tunnel?: {
-    enabled: boolean;
-    provider?: string;
-  };
   backup?: {
     enabled: boolean;
     remote_url: string;

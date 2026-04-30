@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync, existsSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { paths, getAgentName, getHeartbeatInterval, getKybernesisApiKey, getAgentNameForRoot, getIdentityForRoot } from '../config.js';
+import { paths, getAgentName, getHeartbeatInterval, getAgentNameForRoot, getIdentityForRoot } from '../config.js';
 import { loadInstalledSkills } from './loader.js';
 import { InstalledSkill } from './types.js';
 import { loadInstalledAgents } from '../agents/loader.js';
@@ -68,17 +68,12 @@ export function rebuildClaudeMd(root?: string): void {
     content = content.replace(/\{\{HEARTBEAT_INTERVAL\}\}/g, '30 minutes');
   }
 
-  // Strip Kybernesis sections if no API key configured
-  if (!getKybernesisApiKey()) {
-    content = content.replace(
-      /<!-- BEGIN_KYBERNESIS -->[\s\S]*?<!-- END_KYBERNESIS -->\n?/g,
-      ''
-    );
-  } else {
-    // Remove the markers, keep the content
-    content = content.replace(/<!-- BEGIN_KYBERNESIS -->\n?/g, '');
-    content = content.replace(/<!-- END_KYBERNESIS -->\n?/g, '');
-  }
+  // Always strip Kybernesis Cloud sections — this fork doesn't ship the
+  // cloud-sync feature, so the directives shouldn't reach the model.
+  content = content.replace(
+    /<!-- BEGIN_KYBERNESIS -->[\s\S]*?<!-- END_KYBERNESIS -->\n?/g,
+    ''
+  );
 
   // Insert skill list
   const skills = loadInstalledSkills(root);

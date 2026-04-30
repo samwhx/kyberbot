@@ -19,7 +19,6 @@ import { scaffoldAgent } from '../agents/scaffolder.js';
 import { removeAgent } from '../agents/registry.js';
 import { buildSystemPrompt } from '../agents/spawner.js';
 import { Channel } from './channels/types.js';
-import { getTunnelUrl } from '../services/tunnel.js';
 import { createLogger } from '../logger.js';
 
 const logger = createLogger('management-api');
@@ -580,28 +579,6 @@ export function createManagementRouter(channels: Channel[], root: string): Route
       res.status(500).json({ error: 'Failed to trigger heartbeat' });
     }
   }));
-
-  // GET /tunnel — Tunnel status and URL
-  router.get('/tunnel', async (_req, res) => {
-    try {
-      const url = getTunnelUrl();
-      // Also try the ngrok local API as fallback
-      let ngrokUrl = url;
-      if (!ngrokUrl) {
-        try {
-          const response = await fetch('http://localhost:4040/api/tunnels', { signal: AbortSignal.timeout(2000) });
-          if (response.ok) {
-            const data = await response.json() as { tunnels: Array<{ public_url: string; proto: string }> };
-            const https = data.tunnels?.find((t: any) => t.proto === 'https');
-            ngrokUrl = https?.public_url ?? data.tunnels?.[0]?.public_url ?? null;
-          }
-        } catch { /* ngrok API not available */ }
-      }
-      res.json({ url: ngrokUrl, running: !!ngrokUrl });
-    } catch (err) {
-      res.json({ url: null, running: false });
-    }
-  });
 
   // GET /brain-notes — List all memory files across all storage locations
   router.get('/brain-notes', (_req, res) => {
