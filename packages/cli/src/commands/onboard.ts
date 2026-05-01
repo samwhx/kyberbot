@@ -143,6 +143,9 @@ export function createOnboardCommand(): Command {
       if (claudeMode === 'sdk') {
         anthropicKey = await input({
           message: 'Anthropic API key (ANTHROPIC_API_KEY):',
+          validate: (v: string) =>
+            v.trim().length > 0 ||
+            'API key is required when SDK mode is selected. Use the back-arrow to switch to Agent SDK if you want to use your subscription instead.',
         });
       }
 
