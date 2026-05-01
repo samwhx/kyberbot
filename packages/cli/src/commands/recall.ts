@@ -237,35 +237,71 @@ async function getRelatedMemories(root: string, entityName: string): Promise<str
 
     if (sourcePaths.length === 0) return [];
 
-    // Find connected memories via sleep agent edges
-    const relatedPaths = new Set<string>();
-    for (const { source_path } of sourcePaths) {
-      const edges = sleep.prepare(`
-        SELECT
-          CASE WHEN from_path = ? THEN to_path ELSE from_path END as related_path,
-          confidence, shared_tags
-        FROM memory_edges
-        WHERE from_path = ? OR to_path = ?
-        ORDER BY confidence DESC
-        LIMIT 3
-      `).all(source_path, source_path, source_path) as Array<{ related_path: string; confidence: number; shared_tags: string }>;
+    // Single IN-clause edge fetch instead of one query per source_path (was up
+    // to 20 SQLite round-trips). Walk all edges in confidence-DESC order and
+    // assign top-3-considered per source — preserving original LIMIT-3-per-
+    // source semantics where an edge counts toward the 3 even if it gets
+    // filtered out for pointing back to another source_path in our set.
+    const sourcePathArr = sourcePaths.map(s => s.source_path);
+    const placeholders = sourcePathArr.map(() => '?').join(',');
+    const allEdges = sleep.prepare(`
+      SELECT from_path, to_path, confidence, shared_tags
+      FROM memory_edges
+      WHERE from_path IN (${placeholders}) OR to_path IN (${placeholders})
+      ORDER BY confidence DESC
+    `).all(...sourcePathArr, ...sourcePathArr) as Array<{
+      from_path: string;
+      to_path: string;
+      confidence: number;
+      shared_tags: string;
+    }>;
 
-      for (const edge of edges) {
-        if (!sourcePaths.some(s => s.source_path === edge.related_path)) {
-          relatedPaths.add(edge.related_path);
+    const pathSet = new Set(sourcePathArr);
+    const consideredCount = new Map<string, number>();
+    const relatedPaths = new Set<string>();
+
+    for (const edge of allEdges) {
+      const fromIsSource = pathSet.has(edge.from_path);
+      const toIsSource = pathSet.has(edge.to_path);
+
+      if (fromIsSource) {
+        const c = consideredCount.get(edge.from_path) ?? 0;
+        if (c < 3) {
+          consideredCount.set(edge.from_path, c + 1);
+          if (!toIsSource) relatedPaths.add(edge.to_path);
+        }
+      }
+      if (toIsSource) {
+        const c = consideredCount.get(edge.to_path) ?? 0;
+        if (c < 3) {
+          consideredCount.set(edge.to_path, c + 1);
+          if (!fromIsSource) relatedPaths.add(edge.from_path);
         }
       }
     }
 
     if (relatedPaths.size === 0) return [];
 
-    // Get titles for related paths
+    // Single IN-clause title fetch instead of one query per related path.
+    const relArr = [...relatedPaths];
+    const titlePlaceholders = relArr.map(() => '?').join(',');
+    const items = timeline.prepare(`
+      SELECT source_path, title, tier, timestamp
+      FROM timeline_events
+      WHERE source_path IN (${titlePlaceholders})
+    `).all(...relArr) as Array<{
+      source_path: string;
+      title: string;
+      tier: string;
+      timestamp: string;
+    }>;
+    const byPath = new Map(items.map(i => [i.source_path, i]));
+
+    // Iterate the Set so output order matches the original (insertion order
+    // from the edge walk). Drop entries with no timeline row.
     const lines: string[] = [];
     for (const path of relatedPaths) {
-      const item = timeline.prepare(`
-        SELECT title, tier, timestamp FROM timeline_events WHERE source_path = ?
-      `).get(path) as { title: string; tier: string; timestamp: string } | undefined;
-
+      const item = byPath.get(path);
       if (item) {
         const date = new Date(item.timestamp).toLocaleDateString();
         lines.push(`- ${item.title} [${date}] (${item.tier})`);

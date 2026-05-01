@@ -683,18 +683,27 @@ async function enrichResults(
   try {
     const timeline = await getTimelineDb(root);
 
-    for (const result of needsEnrichment) {
-      const row = timeline.prepare(`
-        SELECT tier, priority, tags_json, entities_json
-        FROM timeline_events
-        WHERE source_path = ?
-      `).get(result.source_path) as {
-        tier: string | null;
-        priority: number | null;
-        tags_json: string | null;
-        entities_json: string | null;
-      } | undefined;
+    // Single IN-clause query instead of N per-row lookups (was up to 20 SQLite
+    // round-trips per search). Map results by source_path so we can apply
+    // enrichment to the matching in-memory result object.
+    const paths = needsEnrichment.map(r => r.source_path);
+    const placeholders = paths.map(() => '?').join(',');
+    const rows = timeline.prepare(`
+      SELECT source_path, tier, priority, tags_json, entities_json
+      FROM timeline_events
+      WHERE source_path IN (${placeholders})
+    `).all(...paths) as Array<{
+      source_path: string;
+      tier: string | null;
+      priority: number | null;
+      tags_json: string | null;
+      entities_json: string | null;
+    }>;
 
+    const byPath = new Map(rows.map(r => [r.source_path, r]));
+
+    for (const result of needsEnrichment) {
+      const row = byPath.get(result.source_path);
       if (row) {
         result.tier = row.tier || 'warm';
         result.priority = row.priority ?? 0.5;
@@ -720,6 +729,8 @@ function addRelatedMemories(
   results: HybridSearchResult[],
   root: string
 ): HybridSearchResult[] {
+  if (results.length === 0) return results;
+
   let sleep: import('libsql').Database;
   try {
     sleep = getSleepDb(root);
@@ -727,27 +738,52 @@ function addRelatedMemories(
     return results;
   }
 
-  for (const result of results) {
-    try {
-      const related = sleep.prepare(`
-        SELECT
-          CASE WHEN from_path = ? THEN to_path ELSE from_path END as related_path,
-          confidence
-        FROM memory_edges
-        WHERE from_path = ? OR to_path = ?
-        ORDER BY confidence DESC
-        LIMIT 3
-      `).all(result.source_path, result.source_path, result.source_path) as Array<{
-        related_path: string;
-        confidence: number;
-      }>;
+  // Single IN-clause query instead of one per-result (was up to 20 SQLite
+  // round-trips per search). Get all edges touching any result's source_path,
+  // ordered by confidence DESC, then walk once and assign top-3 per result.
+  try {
+    const paths = results.map(r => r.source_path);
+    const placeholders = paths.map(() => '?').join(',');
+    const allEdges = sleep.prepare(`
+      SELECT from_path, to_path, confidence
+      FROM memory_edges
+      WHERE from_path IN (${placeholders}) OR to_path IN (${placeholders})
+      ORDER BY confidence DESC
+    `).all(...paths, ...paths) as Array<{
+      from_path: string;
+      to_path: string;
+      confidence: number;
+    }>;
 
-      if (related.length > 0) {
-        result.relatedMemories = related.map(r => r.related_path);
+    const pathSet = new Set(paths);
+    const relatedByPath = new Map<string, string[]>();
+
+    // Edges are already sorted by confidence DESC; first 3 hits per path = top 3.
+    for (const edge of allEdges) {
+      if (pathSet.has(edge.from_path)) {
+        const arr = relatedByPath.get(edge.from_path) ?? [];
+        if (arr.length < 3) {
+          arr.push(edge.to_path);
+          relatedByPath.set(edge.from_path, arr);
+        }
       }
-    } catch {
-      // Ignore errors fetching related memories
+      if (pathSet.has(edge.to_path)) {
+        const arr = relatedByPath.get(edge.to_path) ?? [];
+        if (arr.length < 3) {
+          arr.push(edge.from_path);
+          relatedByPath.set(edge.to_path, arr);
+        }
+      }
     }
+
+    for (const result of results) {
+      const related = relatedByPath.get(result.source_path);
+      if (related && related.length > 0) {
+        result.relatedMemories = related;
+      }
+    }
+  } catch {
+    // Ignore errors fetching related memories
   }
 
   return results;
