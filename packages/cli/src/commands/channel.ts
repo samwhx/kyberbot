@@ -13,6 +13,7 @@
 
 import { Command } from 'commander';
 import chalk from 'chalk';
+import { input } from '@inquirer/prompts';
 import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import yaml from 'js-yaml';
@@ -112,7 +113,7 @@ export function createChannelCommand(): Command {
     .description('Add a messaging channel')
     .argument('<type>', 'Channel type: telegram or whatsapp')
     .option('--reverify', 'Clear owner verification and generate a new code on next start')
-    .action((type: string, opts: { reverify?: boolean }) => {
+    .action(async (type: string, opts: { reverify?: boolean }) => {
       if (type !== 'telegram' && type !== 'whatsapp') {
         console.error(chalk.red(`\nUnknown channel type: ${type}`));
         console.log(chalk.dim('  Supported: telegram, whatsapp\n'));
@@ -171,8 +172,30 @@ export function createChannelCommand(): Command {
             return;
           }
 
+          // The hardened WhatsApp channel REFUSES to start without owner_jid
+          // (server/channels/whatsapp.ts:44). Prompt for it now so the
+          // user isn't surprised by a hard error on first `kyberbot run`.
+          console.log(chalk.bold('\nWhatsApp owner JID required'));
+          console.log(chalk.dim('  Anyone who messages the linked WhatsApp number can reach the agent unless'));
+          console.log(chalk.dim('  we restrict it to your JID. Format: <country-code><number>@s.whatsapp.net'));
+          console.log(chalk.dim('  (e.g. 14155551234@s.whatsapp.net for +1-415-555-1234).'));
+          console.log(chalk.dim('  Group JIDs end with @g.us if you want to bind to a group instead.\n'));
+
+          const ownerJid = await input({
+            message: 'WhatsApp owner JID:',
+            validate: (value: string) => {
+              const v = value.trim();
+              if (!v) return 'owner JID is required';
+              if (!/^[\w-]+@(s\.whatsapp\.net|g\.us)$/i.test(v)) {
+                return 'Format: <id>@s.whatsapp.net or <id>@g.us';
+              }
+              return true;
+            },
+          });
+
           channels.whatsapp = {
             enabled: true,
+            owner_jid: ownerJid.trim(),
           };
 
           writeFileSync(identityPath, yaml.dump(identity, { lineWidth: 120 }));
@@ -181,7 +204,8 @@ export function createChannelCommand(): Command {
           console.log('');
           console.log(chalk.dim('  Next steps:'));
           console.log(chalk.dim('  1. Run `kyberbot` to start the pairing process'));
-          console.log(chalk.dim('  2. Scan the QR code with WhatsApp'));
+          console.log(chalk.dim('  2. Scan the QR code with WhatsApp on your phone'));
+          console.log(chalk.dim('  3. Send yourself a message from the bound JID to test'));
           console.log('');
         }
       } catch (error) {

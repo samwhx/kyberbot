@@ -1,13 +1,15 @@
 /**
  * Run Command
  *
- * Start all 6 KyberBot services in order:
- *   1. ChromaDB check
- *   2. Server (Express + brain API)
+ * Start all KyberBot services in order:
+ *   1. ChromaDB check (auto-starts the Docker container, bound 127.0.0.1)
+ *   2. Server (Express + brain API + channel routers, bound 127.0.0.1)
  *   3. Heartbeat
  *   4. Sleep Agent
- *   5. Channels (if configured)
- *   6. Tunnel (optional ngrok tunnel)
+ *   5. Channels (if configured — Telegram and/or WhatsApp)
+ *
+ * (ngrok tunnel was removed in this fork — Tailscale handles cross-device
+ *  reach. Bind override: KYBERBOT_BIND_HOST=0.0.0.0 if you really need it.)
  *
  * Usage:
  *   kyberbot                      # Start everything (default command)

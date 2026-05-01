@@ -1,16 +1,17 @@
 /**
  * Onboard Command
  *
- * Interactive setup wizard with 9 steps:
+ * Interactive setup wizard with 7 steps:
  *   Step 1: Agent identity (name, description, SOUL.md choice)
  *   Step 2: User identity (name, timezone, location, about)
  *   Step 3: Claude Code mode (subscription vs SDK)
  *   Step 4: Brain & heartbeat init (mkdir data/, init memory DBs)
- *   Step 5: Kybernesis (optional cloud sync)
- *   Step 6: Remote Access (optional ngrok tunnel)
- *   Step 7: Channels (Telegram/WhatsApp - optional)
- *   Step 8: GitHub Backup (optional)
- *   Step 9: Done - show summary
+ *   Step 5: Channels (Telegram/WhatsApp - optional)
+ *   Step 6: GitHub Backup (optional)
+ *   Step 7: Done - show summary
+ *
+ * (Cloud sync via Kybernesis and ngrok tunnel were removed in this fork.
+ *  Memory stays local; remote access is via Tailscale + the local server.)
  *
  * Usage:
  *   kyberbot onboard

@@ -361,7 +361,7 @@ kyberbot token regenerate        # Generate a new API token (updates .env)
 kyberbot update                  # Full update: pull CLI source + refresh templates
 kyberbot update --check          # Preview what would change
 kyberbot update --templates      # Only refresh templates (skip CLI update)
-kyberbot onboard                 # Run the initial setup wizard (9-step process)
+kyberbot onboard                 # Run the initial setup wizard (7-step process)
 ```
 
 ### Fleet & Inter-Agent Communication
@@ -388,7 +388,6 @@ kyberbot fleet status                       # Health dashboard for the fleet
 kyberbot fleet start                        # Start agents in a shared runtime
 kyberbot fleet stop [name]                  # Stop one or all agents
 kyberbot fleet register [path]              # Register a local agent directory
-kyberbot fleet register-remote <name> -u <ngrok-url>  # Register a remote agent
 kyberbot fleet unregister <name>            # Remove from registry (files kept)
 ```
 

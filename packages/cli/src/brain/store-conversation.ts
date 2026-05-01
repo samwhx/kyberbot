@@ -203,11 +203,19 @@ function channelToSourceType(channel: string): string {
 /**
  * Store a conversation across all memory subsystems.
  * Call fire-and-forget — never throws, logs all errors internally.
+ *
+ * Always runs the full pipeline (entity extraction, ChromaDB indexing,
+ * fact extraction). The work is enqueued per-root so reply latency is
+ * unaffected — but at scale the queue can grow under bursty channels.
+ * The previous `skipEmbeddings` option was never honored by this
+ * implementation; removed to stop misleading callers. If we ever want
+ * deferred indexing, the right path is a sleep-step backfill that picks
+ * up timeline rows missing ChromaDB entries.
  */
 export function storeConversation(
   root: string,
   input: ConversationInput,
-  options: { entityStoplist?: string[]; skipEmbeddings?: boolean } = {}
+  options: { entityStoplist?: string[] } = {}
 ): Promise<void> {
   return enqueue(root, () => storeConversationImpl(root, input, options));
 }
@@ -215,7 +223,7 @@ export function storeConversation(
 async function storeConversationImpl(
   root: string,
   input: ConversationInput,
-  options: { entityStoplist?: string[]; skipEmbeddings?: boolean } = {}
+  options: { entityStoplist?: string[] } = {}
 ): Promise<void> {
   const conversationId = randomUUID();
   const timestamp = input.timestamp || new Date().toISOString();

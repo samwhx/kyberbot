@@ -188,7 +188,10 @@ export async function startChromaDB(rootDir: string): Promise<ServiceHandle> {
         execFileSync('docker', [
           'run', '-d',
           '--name', CONTAINER_NAME,
-          '-p', `${getChromaPort()}:8000`,
+          // Bind to localhost only. ChromaDB has no auth — without the
+          // 127.0.0.1 prefix it would be reachable on the host's LAN /
+          // tailnet interfaces. Set KYBERBOT_CHROMA_HOST to override.
+          '-p', `${process.env.KYBERBOT_CHROMA_HOST || '127.0.0.1'}:${getChromaPort()}:8000`,
           '-v', `${dataDir}:/chroma/chroma`,
           '-e', 'IS_PERSISTENT=TRUE',
           '-e', 'ANONYMIZED_TELEMETRY=FALSE',
@@ -225,7 +228,10 @@ export async function startChromaDB(rootDir: string): Promise<ServiceHandle> {
       execFileSync('docker', [
         'run', '-d',
         '--name', CONTAINER_NAME,
-        '-p', `${getChromaPort()}:8000`,
+        // Bind to localhost only. ChromaDB has no auth — without the
+        // 127.0.0.1 prefix it would be reachable on the host's LAN /
+        // tailnet interfaces. Set KYBERBOT_CHROMA_HOST to override.
+        '-p', `${process.env.KYBERBOT_CHROMA_HOST || '127.0.0.1'}:${getChromaPort()}:8000`,
         '-v', `${dataDir}:/chroma/chroma`,
         '-e', 'IS_PERSISTENT=TRUE',
         '-e', 'ANONYMIZED_TELEMETRY=FALSE',
