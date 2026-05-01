@@ -116,14 +116,3 @@ Complete reference for all KyberBot CLI commands. **16 top-level commands, 38 su
 | `kyberbot channel add <type>` | Add a messaging channel |
 | `kyberbot channel remove <type>` | Remove a messaging channel |
 | `kyberbot channel status` | Check connectivity |
-
----
-
-## Kybernesis Cloud
-
-| Command | Description |
-|---------|-------------|
-| `kyberbot kybernesis query <message>` | Search the cloud brain |
-| `kyberbot kybernesis list` | List all cloud memories |
-| `kyberbot kybernesis status` | Check connection status |
-| `kyberbot kybernesis disconnect` | Remove API key, switch to local-only |

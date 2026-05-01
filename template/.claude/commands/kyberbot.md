@@ -332,31 +332,7 @@ cd $KYBERBOT_ROOT && kyberbot update --templates
 
 ---
 
-### Remote Access & API
-
-#### `/kyberbot tunnel setup`
-Configure ngrok authtoken for remote access to the local server.
-
-**Implementation:**
-```bash
-cd $KYBERBOT_ROOT && kyberbot tunnel setup
-```
-
-#### `/kyberbot tunnel status`
-Check active ngrok tunnels.
-
-**Implementation:**
-```bash
-cd $KYBERBOT_ROOT && kyberbot tunnel status
-```
-
-#### `/kyberbot tunnel start`
-Start an ngrok tunnel to the local server port.
-
-**Implementation:**
-```bash
-cd $KYBERBOT_ROOT && kyberbot tunnel start
-```
+### API Token
 
 #### `/kyberbot token`
 Show the current API authentication token.
@@ -404,7 +380,7 @@ Options:
 - `-v, --verbose` — Enable debug logging
 
 #### `/kyberbot onboard`
-Run the initial setup wizard. An 8-step interactive process that configures agent identity, user info, Claude mode, brain initialization, Kybernesis cloud, remote access, and messaging channels.
+Run the initial setup wizard. A 7-step interactive process that configures agent identity, user info, Claude mode, brain initialization, messaging channels, GitHub backup, and a final summary.
 
 **Implementation:**
 ```bash
@@ -426,7 +402,7 @@ The agent can directly edit `identity.yaml` for these fields:
 | `heartbeat_active_hours` | Edit identity.yaml (start/end times + timezone) |
 | `claude.model` | Edit identity.yaml (`opus`, `sonnet`, or `haiku`) |
 
-For channels and tunnel config, use the CLI commands instead of direct file editing.
+For channels, use the CLI commands instead of direct file editing.
 
 ---
 

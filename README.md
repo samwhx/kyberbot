@@ -138,15 +138,6 @@ When your agent encounters a task it cannot handle, it creates a new skill:
 - Skills accumulate over time, making the agent permanently more capable
 - Full lifecycle management: list, create, remove, setup
 
-### Kybernesis Cloud (Optional)
-
-Connect to [Kybernesis](https://kybernesis.ai) for cloud-backed workspace memory:
-
-- Query workspace memories from any device
-- Complements local memory -- cloud results fill gaps in local recall
-- API key only, no extra configuration
-- Disconnect anytime with `kyberbot kybernesis disconnect`
-
 ---
 
 ## How It Works
@@ -193,12 +184,6 @@ Background operations (heartbeats, channel messages) use the Agent SDK (`@anthro
 │  │              Sleep Agent                       │     │
 │  │  decay → tag → link → tier → summarize →       │     │
 │  │  entity hygiene                                │     │
-│  └────────────────────────────────────────────────┘     │
-├─────────────────────────────────────────────────────────┤
-│           Optional: Kybernesis Cloud                    │
-│  ┌────────────────────────────────────────────────┐     │
-│  │  Cloud workspace memory (query endpoint)       │     │
-│  │  API key only — complements local memory       │     │
 │  └────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -284,7 +269,6 @@ Visit the [GitHub Discussion](https://github.com/KybernesisAI/kyberbot/discussio
 - [Skills](docs/skills.md) -- Skill system and auto-generation
 - [Channels](docs/channels.md) -- Telegram and WhatsApp messaging setup
 - [Architecture](docs/architecture.md) -- System overview, data flow, file structure
-- [Kybernesis Cloud](docs/kybernesis.md) -- Optional cloud memory
 - [VPS Deployment](docs/vps-deployment.md) -- Run KyberBot on a server for 24/7 uptime
 - [CLI Reference](docs/cli-reference.md) -- Complete command reference (16 commands, 38 subcommands)
 - [Why KyberBot?](docs/why-kyberbot.md) -- Positioning and philosophy

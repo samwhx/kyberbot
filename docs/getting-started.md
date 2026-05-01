@@ -300,12 +300,6 @@ kyberbot skill info my-skill        # Show skill details
 kyberbot update                     # Update CLI and refresh templates
 kyberbot update --check             # Preview available updates
 kyberbot update --templates         # Refresh templates only
-
-# Kybernesis Cloud
-kyberbot kybernesis query "..."     # Search cloud workspace memory
-kyberbot kybernesis list            # Browse all memories
-kyberbot kybernesis status          # Check connection status
-kyberbot kybernesis disconnect      # Switch to local-only memory
 ```
 
 ---

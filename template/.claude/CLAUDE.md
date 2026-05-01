@@ -84,7 +84,7 @@ After changing `heartbeat_interval` or `heartbeat_active_hours`, the change take
 | `.env` | Credentials — tell the user what to add, don't write secrets directly |
 | `CLAUDE.md` | Auto-generated (this file) — use `kyberbot skill rebuild` to regenerate |
 | `.claude/settings.local.json` | Permissions |
-| `identity.yaml` fields not listed above | Server port, channel tokens, tunnel config — use `kyberbot channel`/`kyberbot tunnel` commands instead |
+| `identity.yaml` fields not listed above | Server port, channel tokens — use `kyberbot channel` commands instead |
 
 ### Autonomous Skill Creation
 
@@ -347,13 +347,9 @@ kyberbot backup status           # Show backup config, last commit, sync state
 kyberbot backup setup            # Interactive backup configuration
 ```
 
-### Remote Access & API
+### API Token
 
 ```bash
-kyberbot tunnel setup            # Configure ngrok authtoken for remote access
-kyberbot tunnel status           # Check active tunnels
-kyberbot tunnel start            # Start ngrok tunnel to local server
-
 kyberbot token                   # Show current API authentication token
 kyberbot token show              # Same as above
 kyberbot token regenerate        # Generate a new API token (updates .env)

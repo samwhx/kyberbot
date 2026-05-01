@@ -17,7 +17,7 @@ The brain consists of six components:
 | **Reasoning Engine** | Deduction and pattern recognition across entities |
 | **Sleep Agent** | Continuous memory maintenance and quality improvement |
 
-All data lives locally in your KyberBot project directory. Nothing leaves your machine unless you opt into Kybernesis Cloud sync.
+All data lives locally in your KyberBot project directory. This fork ships local-only — nothing leaves your machine.
 
 ---
 
@@ -481,4 +481,4 @@ User / Channel / Heartbeat
 
 ## Privacy
 
-All brain data is stored locally in your project directory. The agent never sends memory data to external services unless you explicitly configure Kybernesis Cloud sync. See [Kybernesis](kybernesis.md) for details on optional cloud sync.
+All brain data is stored locally in your project directory. This fork ships local-only — the agent never sends memory data to external services.

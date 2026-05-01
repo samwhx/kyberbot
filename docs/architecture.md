@@ -107,14 +107,6 @@ All three modes use the same brain, skills, and living documents. The mode is de
 │  │  entity hygiene                             │                 │
 │  └────────────────────────────────────────────┘                 │
 │                                                                  │
-├──────────────────────────────────────────────────────────────────┤
-│              Optional: Kybernesis Cloud                          │
-│                                                                  │
-│  ┌────────────────────────────────────────────┐                 │
-│  │  Cloud workspace memory (query endpoint)   │                 │
-│  │  API key only — no sync, no push/pull       │                 │
-│  │  Complements Kybernesis Local with cloud recall │                 │
-│  └────────────────────────────────────────────┘                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -369,7 +361,7 @@ Living documents, skills, and knowledge files are all markdown. This makes them:
 
 ### Why Local-First
 
-All data lives on your machine by default. Kybernesis Cloud is optional and query-based -- it complements Kybernesis Local but never replaces it. This ensures:
+All data lives on your machine. This fork ships local-only — no cloud sync. This ensures:
 
 - Privacy by default
 - No dependency on external services
