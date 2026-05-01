@@ -85,12 +85,20 @@ audits closed ~43 findings; performance work brought cold search from
 
 ### Tests
 
-- 432/432 vitest cases passing (was 390 + 36 failing on the prior
+- 437/437 vitest cases passing (was 390 + 36 failing on the prior
   hardening contracts that pre-dated the test alignment).
-- Added net +6 tests for previously-uncovered hardening behaviors:
-  too-short-token rejection, WhatsApp owner-jid refusal, WhatsApp
-  non-owner JID drop, web vs messaging channel tool-access prompts,
-  untrusted-input handling directive, XML-tag injection escape.
+- Added net +11 tests:
+  - Hardening contracts: too-short-token rejection, WhatsApp owner-jid
+    refusal, WhatsApp non-owner JID drop, web vs messaging channel
+    tool-access prompts, untrusted-input handling directive, XML-tag
+    injection escape.
+  - `getRerankConfig()` resolution chain: auto-fallback to claude when
+    no key, auto-pick openai when `OPENAI_API_KEY` is set, env override
+    `KYBERBOT_RERANK_PROVIDER` precedence over auto, unknown-provider
+    values ignored.
+  - Note: `rerankWithOpenAI` itself is smoke-tested only (not unit-
+    tested with a mocked OpenAI client). The Claude-fallback path is
+    exercised end-to-end via `hybridSearch` integration coverage.
 
 ## [1.0.0] - 2026-03-31
 

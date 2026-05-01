@@ -186,7 +186,12 @@ export function createChannelCommand(): Command {
             validate: (value: string) => {
               const v = value.trim();
               if (!v) return 'owner JID is required';
-              if (!/^[\w-]+@(s\.whatsapp\.net|g\.us)$/i.test(v)) {
+              // Allow letters, digits, `_`, `-`, `.`, and `:` in the local
+              // part. Multi-device WhatsApp accounts emit JIDs like
+              // `1234567890:42@s.whatsapp.net` (the `:N` is a device tag);
+              // group LIDs sometimes include dots. The previous \w+- regex
+              // rejected both forms.
+              if (!/^[\w.:-]+@(s\.whatsapp\.net|g\.us)$/i.test(v)) {
                 return 'Format: <id>@s.whatsapp.net or <id>@g.us';
               }
               return true;
