@@ -64,11 +64,18 @@ vi.mock('@whiskeysockets/baileys', () => ({
 
 const { WhatsAppChannel } = await import('./whatsapp.js');
 
+// The hardened channel refuses to start unless an owner JID is configured
+// and silently drops messages from anyone else. Tests that exercise the
+// message pipeline use this owner JID; the "non-owner drop" case uses a
+// different JID to verify rejection.
+const OWNER_JID = 'owner@s.whatsapp.net';
+const NON_OWNER_JID = 'stranger@s.whatsapp.net';
+
 describe('WhatsAppChannel', () => {
   let channel: InstanceType<typeof WhatsAppChannel>;
 
   beforeEach(() => {
-    channel = new WhatsAppChannel('/tmp/test-root');
+    channel = new WhatsAppChannel('/tmp/test-root', OWNER_JID);
     mockEventHandlers.clear();
     mockComplete.mockReset();
     mockSendMessage.mockReset();
@@ -88,6 +95,11 @@ describe('WhatsAppChannel', () => {
   });
 
   describe('start', () => {
+    it('refuses to start without owner_jid configured', async () => {
+      const noOwner = new WhatsAppChannel('/tmp/test-root');
+      await expect(noOwner.start()).rejects.toThrow(/owner_jid/);
+    });
+
     it('should register event handlers', async () => {
       await channel.start();
 
@@ -160,12 +172,12 @@ describe('WhatsAppChannel', () => {
 
       await channel.start();
 
-      // Simulate incoming message
+      // Simulate incoming message FROM THE OWNER
       const messageHandler = mockEventHandlers.get('messages.upsert')!;
       await messageHandler({
         messages: [{
           message: { conversation: 'test message' },
-          key: { id: 'msg-1', fromMe: false, remoteJid: 'sender@s.whatsapp.net' },
+          key: { id: 'msg-1', fromMe: false, remoteJid: OWNER_JID },
           pushName: 'Test User',
           messageTimestamp: Math.floor(Date.now() / 1000),
         }],
@@ -175,7 +187,7 @@ describe('WhatsAppChannel', () => {
       const call = handler.mock.calls[0][0];
       expect(call.text).toBe('test message');
       expect(call.channelType).toBe('whatsapp');
-      expect(call.from).toBe('sender@s.whatsapp.net');
+      expect(call.from).toBe(OWNER_JID);
     });
   });
 
@@ -187,12 +199,32 @@ describe('WhatsAppChannel', () => {
       await messageHandler({
         messages: [{
           message: { conversation: 'my own message' },
-          key: { id: 'msg-1', fromMe: true, remoteJid: 'self@s.whatsapp.net' },
+          key: { id: 'msg-1', fromMe: true, remoteJid: OWNER_JID },
           messageTimestamp: Math.floor(Date.now() / 1000),
         }],
       });
 
       expect(mockComplete).not.toHaveBeenCalled();
+    });
+
+    it('should silently drop messages from non-owner JIDs', async () => {
+      const handler = vi.fn();
+      channel.onMessage(handler);
+      await channel.start();
+
+      const messageHandler = mockEventHandlers.get('messages.upsert')!;
+      await messageHandler({
+        messages: [{
+          message: { conversation: 'hi from a stranger' },
+          key: { id: 'msg-x', fromMe: false, remoteJid: NON_OWNER_JID },
+          pushName: 'Stranger',
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        }],
+      });
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(mockComplete).not.toHaveBeenCalled();
+      expect(mockSendMessage).not.toHaveBeenCalled();
     });
 
     it('should skip messages with no text', async () => {
@@ -202,7 +234,7 @@ describe('WhatsAppChannel', () => {
       await messageHandler({
         messages: [{
           message: null,
-          key: { id: 'msg-1', fromMe: false, remoteJid: 'sender@s.whatsapp.net' },
+          key: { id: 'msg-1', fromMe: false, remoteJid: OWNER_JID },
           messageTimestamp: Math.floor(Date.now() / 1000),
         }],
       });
@@ -219,7 +251,7 @@ describe('WhatsAppChannel', () => {
       await messageHandler({
         messages: [{
           message: { extendedTextMessage: { text: 'extended text' } },
-          key: { id: 'msg-1', fromMe: false, remoteJid: 'sender@s.whatsapp.net' },
+          key: { id: 'msg-1', fromMe: false, remoteJid: OWNER_JID },
           pushName: 'Test User',
           messageTimestamp: Math.floor(Date.now() / 1000),
         }],
@@ -238,14 +270,14 @@ describe('WhatsAppChannel', () => {
       await messageHandler({
         messages: [{
           message: { conversation: 'hello bot' },
-          key: { id: 'msg-1', fromMe: false, remoteJid: 'sender@s.whatsapp.net' },
+          key: { id: 'msg-1', fromMe: false, remoteJid: OWNER_JID },
           pushName: 'Test User',
           messageTimestamp: Math.floor(Date.now() / 1000),
         }],
       });
 
       expect(mockComplete).toHaveBeenCalledTimes(1);
-      expect(mockSendMessage).toHaveBeenCalledWith('sender@s.whatsapp.net', { text: 'Claude response' });
+      expect(mockSendMessage).toHaveBeenCalledWith(OWNER_JID, { text: 'Claude response' });
     });
 
     it('should skip reply when Claude returns empty response', async () => {
@@ -257,7 +289,7 @@ describe('WhatsAppChannel', () => {
       await messageHandler({
         messages: [{
           message: { conversation: 'hello' },
-          key: { id: 'msg-1', fromMe: false, remoteJid: 'sender@s.whatsapp.net' },
+          key: { id: 'msg-1', fromMe: false, remoteJid: OWNER_JID },
           pushName: 'Test User',
           messageTimestamp: Math.floor(Date.now() / 1000),
         }],

@@ -153,10 +153,19 @@ export function validateTokenForRoot(token: string, root: string): boolean {
 
 /**
  * Clear cached token for a root (e.g., after token rotation).
+ *
+ * When called with no root, also clears the singleton `apiToken` cache —
+ * the only way to force a re-read of `process.env.KYBERBOT_API_TOKEN` from
+ * outside the module. Tests rely on this to switch token state between
+ * cases without re-importing.
  */
 export function clearTokenCache(root?: string): void {
-  if (root) agentTokens.delete(root);
-  else agentTokens.clear();
+  if (root) {
+    agentTokens.delete(root);
+  } else {
+    agentTokens.clear();
+    apiToken = null;
+  }
 }
 
 export function optionalAuthMiddleware(

@@ -80,11 +80,17 @@ vi.mock('grammy', () => ({
   })),
 }));
 
-vi.mock('crypto', () => ({
-  randomBytes: vi.fn(() => ({
-    toString: () => 'abc123',
-  })),
-}));
+vi.mock('crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('crypto')>();
+  return {
+    ...actual,
+    // Override randomBytes only — keep timingSafeEqual + others real so the
+    // verification compare still works.
+    randomBytes: vi.fn(() => ({
+      toString: () => 'abc123',
+    })),
+  };
+});
 
 const { TelegramChannel } = await import('./telegram.js');
 
@@ -309,7 +315,7 @@ describe('TelegramChannel', () => {
       const ctx = {
         chat: { id: 42 },
         from: { id: 1 },
-        message: { text: '/start ABC123', message_id: 1, date: Math.floor(Date.now() / 1000) },
+        message: { text: '/start abc123', message_id: 1, date: Math.floor(Date.now() / 1000) },
         reply: vi.fn(),
       };
 

@@ -12,8 +12,11 @@ vi.mock('../logger.js', () => ({
 }));
 
 // Dynamic import so mocks are in place
-const { authMiddleware, validateToken, getApiToken, optionalAuthMiddleware } =
+const { authMiddleware, validateToken, getApiToken, optionalAuthMiddleware, clearTokenCache } =
   await import('./auth.js');
+
+// 40 chars — must be >=32 to satisfy the new auth.ts strength check.
+const TEST_TOKEN = 'test-token-1234567890abcdefghijklmnopqrst';
 
 function mockReq(headers: Record<string, string> = {}, path = '/test'): Request {
   return { headers, path, ip: '127.0.0.1' } as unknown as Request;
@@ -30,35 +33,38 @@ describe('auth middleware', () => {
   const originalEnv = process.env.KYBERBOT_API_TOKEN;
 
   afterEach(() => {
-    // Restore env
     if (originalEnv !== undefined) {
       process.env.KYBERBOT_API_TOKEN = originalEnv;
     } else {
       delete process.env.KYBERBOT_API_TOKEN;
     }
+    clearTokenCache();
   });
 
   describe('when KYBERBOT_API_TOKEN is not set', () => {
     beforeEach(() => {
       delete process.env.KYBERBOT_API_TOKEN;
+      clearTokenCache();
     });
 
-    it('should pass through without auth', () => {
+    it('should reject requests without Authorization header (no fallthrough)', () => {
+      // The old behavior was to call next() when no env token was set; the
+      // hardened middleware refuses to fall through and returns 401 instead.
       const req = mockReq();
       const res = mockRes();
-      let called = false;
-      const next: NextFunction = () => { called = true; };
+      const next: NextFunction = vi.fn();
 
       authMiddleware(req, res, next);
-      expect(called).toBe(true);
+
+      expect(res._status).toBe(401);
+      expect(next).not.toHaveBeenCalled();
     });
   });
 
   describe('when KYBERBOT_API_TOKEN is set', () => {
-    const TEST_TOKEN = 'test-secret-token-12345';
-
     beforeEach(() => {
       process.env.KYBERBOT_API_TOKEN = TEST_TOKEN;
+      clearTokenCache();
     });
 
     it('should reject requests without Authorization header', () => {
@@ -89,7 +95,7 @@ describe('auth middleware', () => {
     });
 
     it('should reject requests with invalid token', () => {
-      const req = mockReq({ authorization: 'Bearer wrong-token' });
+      const req = mockReq({ authorization: 'Bearer wrong-token-1234567890abcdefghijklmnopqrst' });
       const res = mockRes();
       const next: NextFunction = vi.fn();
 
@@ -115,9 +121,36 @@ describe('auth middleware', () => {
       expect(res._status).toBe(200); // unchanged
     });
   });
+
+  describe('when KYBERBOT_API_TOKEN is too short', () => {
+    beforeEach(() => {
+      process.env.KYBERBOT_API_TOKEN = 'short-token';
+      clearTokenCache();
+    });
+
+    it('throws on getApiToken (>=32 chars required)', () => {
+      expect(() => getApiToken()).toThrow(/too short/i);
+    });
+  });
 });
 
 describe('validateToken', () => {
+  const originalEnv = process.env.KYBERBOT_API_TOKEN;
+
+  beforeEach(() => {
+    process.env.KYBERBOT_API_TOKEN = TEST_TOKEN;
+    clearTokenCache();
+  });
+
+  afterEach(() => {
+    if (originalEnv !== undefined) {
+      process.env.KYBERBOT_API_TOKEN = originalEnv;
+    } else {
+      delete process.env.KYBERBOT_API_TOKEN;
+    }
+    clearTokenCache();
+  });
+
   it('should return true for matching token', () => {
     const token = getApiToken();
     expect(validateToken(token)).toBe(true);
@@ -129,6 +162,22 @@ describe('validateToken', () => {
 });
 
 describe('optionalAuthMiddleware', () => {
+  const originalEnv = process.env.KYBERBOT_API_TOKEN;
+
+  beforeEach(() => {
+    process.env.KYBERBOT_API_TOKEN = TEST_TOKEN;
+    clearTokenCache();
+  });
+
+  afterEach(() => {
+    if (originalEnv !== undefined) {
+      process.env.KYBERBOT_API_TOKEN = originalEnv;
+    } else {
+      delete process.env.KYBERBOT_API_TOKEN;
+    }
+    clearTokenCache();
+  });
+
   it('should always call next', () => {
     const req = mockReq();
     const res = mockRes();

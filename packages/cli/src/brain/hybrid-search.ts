@@ -5,12 +5,14 @@
  * and temporal search (date expressions). Uses Reciprocal Rank Fusion (RRF)
  * to merge ranked lists without needing tuned weights.
  *
- * Optional Haiku-powered reranking for user-facing searches.
+ * Optional LLM-powered reranking for user-facing searches. Default provider
+ * is OpenAI gpt-5.4-nano (~300ms) when OPENAI_API_KEY is set; falls back to
+ * Claude Haiku via subprocess (~2s) otherwise. See getRerankConfig().
  */
 
 import { createLogger } from '../logger.js';
-import { getRoot } from '../config.js';
-import { semanticSearch, type SearchResult } from './embeddings.js';
+import { getRoot, getRerankConfig } from '../config.js';
+import { semanticSearch, type SearchResult, getOpenAIClient } from './embeddings.js';
 import { getTimelineDb } from './timeline.js';
 import { getSleepDb } from './sleep/db.js';
 import { getClaudeClient } from '../claude.js';
@@ -159,34 +161,92 @@ async function temporalSearch(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// HAIKU RERANKING
+// RERANKING
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Rerank search results using Claude Haiku for better precision.
- * Takes top N candidates and returns them reranked by relevance.
+ * Build the user-facing prompt body shared by both rerank providers. The
+ * passages are 1-indexed for legibility in the LLM's response — the
+ * dispatcher converts back to 0-indexed when applying the ordering.
  */
-async function haikusRerank(
-  query: string,
-  candidates: HybridSearchResult[],
-  limit: number
-): Promise<HybridSearchResult[]> {
-  if (candidates.length <= 3) return candidates; // Too few to bother reranking
-
-  // Take top 20 candidates for reranking (cost control)
-  const toRerank = candidates.slice(0, Math.min(20, candidates.length));
-
-  // Build reranking prompt
+function buildRerankPrompt(query: string, toRerank: HybridSearchResult[]): string {
   const numbered = toRerank.map((r, i) =>
     `[${i + 1}] ${r.content.slice(0, 200)}`
   ).join('\n');
 
-  const prompt = `Given the search query, rank these ${toRerank.length} text passages by relevance. Return ONLY a JSON array of the passage numbers in order of relevance, most relevant first. Example: [3, 1, 7, 2]
+  return `Rank these ${toRerank.length} text passages by relevance to the query.
 
 Query: "${query}"
 
 Passages:
-${numbered}
+${numbered}`;
+}
+
+/**
+ * OpenAI rerank path — fast (~300ms via gpt-5.4-nano), uses
+ * response_format json_object for reliable parsing, hard-capped at 5s
+ * via AbortSignal so a slow response can't defeat the latency win.
+ *
+ * Returns 1-indexed ranking array, or null on any failure (caller falls
+ * back to Claude). Throws are captured and logged at debug level.
+ */
+async function rerankWithOpenAI(
+  query: string,
+  toRerank: HybridSearchResult[],
+  model: string
+): Promise<number[] | null> {
+  try {
+    const openai = getOpenAIClient();
+    const response = await openai.chat.completions.create(
+      {
+        model,
+        temperature: 0,
+        max_completion_tokens: 200,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You rank text passages by relevance to a query. ' +
+              'Return JSON in the form {"ranking": [n, n, ...]} where each n ' +
+              'is a 1-indexed passage number, most relevant first.',
+          },
+          { role: 'user', content: buildRerankPrompt(query, toRerank) },
+        ],
+      },
+      { signal: AbortSignal.timeout(5000) }
+    );
+
+    const content = response.choices[0]?.message?.content;
+    if (!content) return null;
+
+    const parsed = JSON.parse(content) as { ranking?: unknown };
+    const ranking = parsed.ranking;
+    if (!Array.isArray(ranking)) return null;
+
+    const cleaned = ranking.filter((n): n is number => typeof n === 'number');
+    return cleaned.length > 0 ? cleaned : null;
+  } catch (err) {
+    logger.debug('OpenAI rerank failed', { error: String(err) });
+    return null;
+  }
+}
+
+/**
+ * Claude rerank path — original implementation, kept verbatim except for
+ * the JSON-array regex extraction now isolated here. Slow (~2s) due to
+ * Claude Code CLI subprocess startup, but always available on subscription.
+ *
+ * Used as a fallback when OpenAI is unavailable or explicitly chosen via
+ * `rerank.provider: 'claude'` in identity.yaml.
+ */
+async function rerankWithClaude(
+  query: string,
+  toRerank: HybridSearchResult[]
+): Promise<number[] | null> {
+  const prompt = `${buildRerankPrompt(query, toRerank)}
+
+Return ONLY a JSON array of the passage numbers in order of relevance, most relevant first. Example: [3, 1, 7, 2]
 
 Ranking (JSON array of numbers):`;
 
@@ -200,36 +260,79 @@ Ranking (JSON array of numbers):`;
     });
 
     const match = response.match(/\[[\d,\s]+\]/);
-    if (!match) return candidates;
+    if (!match) return null;
 
-    const ranking: number[] = JSON.parse(match[0]);
-    const reranked: HybridSearchResult[] = [];
+    const ranking = JSON.parse(match[0]);
+    if (!Array.isArray(ranking)) return null;
 
-    for (const idx of ranking) {
-      const i = idx - 1; // Convert to 0-indexed
-      if (i >= 0 && i < toRerank.length) {
-        const result = toRerank[i];
-        result.hybridScore = 1.0 - (reranked.length * 0.05); // Descending score
-        reranked.push(result);
-      }
-    }
-
-    // Add any candidates not in the reranked list
-    for (const c of toRerank) {
-      if (!reranked.includes(c)) {
-        c.hybridScore = 0.1;
-        reranked.push(c);
-      }
-    }
-
-    // Add remaining candidates beyond top 20
-    reranked.push(...candidates.slice(20));
-
-    return reranked.slice(0, limit);
-  } catch {
-    // Reranking failed, return original order
-    return candidates;
+    const cleaned = ranking.filter((n: unknown): n is number => typeof n === 'number');
+    return cleaned.length > 0 ? cleaned : null;
+  } catch (err) {
+    logger.debug('Claude rerank failed', { error: String(err) });
+    return null;
   }
+}
+
+/**
+ * Rerank search results using an LLM-as-judge.
+ * Takes top N candidates and returns them reranked by relevance.
+ *
+ * Provider chosen via getRerankConfig(). OpenAI is preferred when
+ * available; Claude Haiku is used as fallback. If both fail (or rerank is
+ * unavailable), returns candidates in the original RRF-fused order.
+ */
+async function rerankCandidates(
+  query: string,
+  candidates: HybridSearchResult[],
+  limit: number
+): Promise<HybridSearchResult[]> {
+  if (candidates.length <= 3) return candidates; // Too few to bother reranking
+
+  // Take top 20 candidates for reranking (cost control)
+  const toRerank = candidates.slice(0, Math.min(20, candidates.length));
+
+  const { provider, model } = getRerankConfig();
+
+  // Try the chosen provider; on null (failure or unparseable response),
+  // automatically fall back to Claude if we weren't already on it.
+  let ranking: number[] | null = null;
+  if (provider === 'openai') {
+    ranking = await rerankWithOpenAI(query, toRerank, model);
+    if (!ranking) {
+      logger.debug('OpenAI rerank returned null, falling back to Claude');
+      ranking = await rerankWithClaude(query, toRerank);
+    }
+  } else {
+    ranking = await rerankWithClaude(query, toRerank);
+  }
+
+  // Both paths failed — return original order.
+  if (!ranking) return candidates;
+
+  // Apply the ranking (existing logic, unchanged).
+  const reranked: HybridSearchResult[] = [];
+  for (const idx of ranking) {
+    const i = idx - 1; // Convert to 0-indexed
+    if (i >= 0 && i < toRerank.length) {
+      const result = toRerank[i];
+      result.hybridScore = 1.0 - (reranked.length * 0.05); // Descending score
+      reranked.push(result);
+    }
+  }
+
+  // Add any candidates not in the reranked list (the LLM omitted them
+  // — keep them at lower score so they still appear).
+  for (const c of toRerank) {
+    if (!reranked.includes(c)) {
+      c.hybridScore = 0.1;
+      reranked.push(c);
+    }
+  }
+
+  // Add remaining candidates beyond top 20
+  reranked.push(...candidates.slice(20));
+
+  return reranked.slice(0, limit);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -538,7 +641,7 @@ export async function hybridSearch(
 
   // ─── Haiku reranking (opt-in) ────────────────────────────────────────────
   if (rerank && results.length > 3) {
-    results = await haikusRerank(query, results, limit);
+    results = await rerankCandidates(query, results, limit);
   } else {
     results = results.slice(0, limit);
   }

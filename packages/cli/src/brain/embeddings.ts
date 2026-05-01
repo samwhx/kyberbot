@@ -95,7 +95,7 @@ let chromaAvailable = false;
 // Per-agent collections
 const collections = new Map<string, Collection>();
 
-function getOpenAIClient(): OpenAI {
+export function getOpenAIClient(): OpenAI {
   if (!openaiClient) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {

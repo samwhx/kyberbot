@@ -127,6 +127,38 @@ export function getClaudeModel(): string {
 }
 
 /**
+ * Get hybrid-search rerank config. The rerank step (LLM-judge ordering of
+ * top candidates) used to always go through a Claude Haiku subprocess
+ * (~2s). When OPENAI_API_KEY is set we route through OpenAI gpt-5.4-nano
+ * by default (~300ms). Resolution order: env > identity.yaml > auto.
+ *
+ * - provider: 'openai' | 'claude'  (auto: openai if OPENAI_API_KEY set)
+ * - model: model id for the chosen provider
+ *
+ * Override via KYBERBOT_RERANK_PROVIDER env var or identity.rerank.* fields.
+ */
+export function getRerankConfig(): { provider: 'openai' | 'claude'; model: string } {
+  const envProvider = process.env.KYBERBOT_RERANK_PROVIDER;
+
+  let identity: IdentityConfig | null = null;
+  try { identity = getIdentity(); } catch { /* fleet/no-root */ }
+
+  let provider: 'openai' | 'claude';
+  if (envProvider === 'openai' || envProvider === 'claude') {
+    provider = envProvider;
+  } else if (identity?.rerank?.provider === 'openai' || identity?.rerank?.provider === 'claude') {
+    provider = identity.rerank.provider;
+  } else {
+    provider = process.env.OPENAI_API_KEY ? 'openai' : 'claude';
+  }
+
+  const model = identity?.rerank?.model
+    ?? (provider === 'openai' ? 'gpt-5.4-nano' : 'haiku');
+
+  return { provider, model };
+}
+
+/**
  * Get the model to use for heartbeat (scheduled task execution) and the
  * orchestration CEO/worker heartbeats. Sonnet by default — heartbeat is
  * tool-use orchestration, not deep reasoning. Override with

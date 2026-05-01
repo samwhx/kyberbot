@@ -107,13 +107,18 @@ describe('GET /memory/:block', () => {
     expect(res.body.error).toContain('Invalid block');
   });
 
-  it('should return 404 when file not found', async () => {
+  it('should return empty content (200) when file not found', async () => {
+    // Intentional behavior per web-api.ts:51-52 — ENOENT yields an empty
+    // editable block in the UI rather than 404 (which would gate the user
+    // from creating SOUL.md / USER.md / HEARTBEAT.md on first run).
     const err = new Error('ENOENT') as NodeJS.ErrnoException;
     err.code = 'ENOENT';
     mockReadFileSync.mockImplementation(() => { throw err; });
 
     const res = await request(app).get('/memory/soul');
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    expect(res.body.content).toBe('');
+    expect(res.body.lastModified).toBe('');
   });
 
   it('should return 500 on other read errors', async () => {

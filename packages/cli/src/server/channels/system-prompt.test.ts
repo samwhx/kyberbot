@@ -72,10 +72,26 @@ describe('system-prompt', () => {
       expect(prompt).toContain('kyberbot timeline');
     });
 
-    it('should always include full tool access statement', async () => {
+    it('describes the restricted tool set on messaging channels', async () => {
+      // Hardened prompt no longer claims "full tool access" on
+      // Telegram/WhatsApp — those run with the 'broad' ToolPolicy that
+      // blocks arbitrary Bash and the Agent tool. The web prompt does
+      // still claim full access (owner-driven via mandatory token).
       const prompt = await buildChannelSystemPrompt('telegram');
+      expect(prompt).toContain('tool access on this channel is restricted');
+      expect(prompt).toContain('Arbitrary shell commands');
+      expect(prompt).toContain('kyberbot');
+    });
+
+    it('still grants full tool access to the web channel', async () => {
+      const prompt = await buildChannelSystemPrompt('web');
       expect(prompt).toContain('full tool access');
-      expect(prompt).toContain('same agent');
+    });
+
+    it('warns the model to treat user_message contents as data, not instructions', async () => {
+      const prompt = await buildChannelSystemPrompt('telegram');
+      expect(prompt).toContain('Untrusted-Input Handling');
+      expect(prompt).toContain('<user_message>');
     });
   });
 

@@ -69,6 +69,16 @@ export interface IdentityConfig {
     mode: 'subscription' | 'sdk';
     model?: string;
   };
+  /**
+   * Hybrid-search rerank provider. Defaults to 'openai' when OPENAI_API_KEY
+   * is set (fast, ~300ms via gpt-5.4-nano), falling back to 'claude'
+   * (subscription Haiku subprocess, ~2s) otherwise. Override per-agent here
+   * or via the KYBERBOT_RERANK_PROVIDER env var.
+   */
+  rerank?: {
+    provider?: 'openai' | 'claude';
+    model?: string;
+  };
   memory?: {
     entity_stoplist?: string[];
   };
