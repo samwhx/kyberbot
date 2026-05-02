@@ -22,7 +22,7 @@
  */
 
 import { Command } from 'commander';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -40,6 +40,8 @@ interface SpeakOptions {
   model: string;
   /** When true, generate the audio but don't play it (for piping / testing). */
   dryRun?: boolean;
+  /** When true, block until audio playback finishes (default: detach). */
+  wait?: boolean;
 }
 
 export function createSpeakCommand(): Command {
@@ -57,6 +59,7 @@ export function createSpeakCommand(): Command {
       'tts-1',
     )
     .option('--dry-run', 'generate audio file but do not play it')
+    .option('--wait', 'block until audio playback finishes (default: detach so caller returns immediately while audio plays in background)')
     .action(async (text: string, options: SpeakOptions) => {
       // Validate inputs early
       if (!text || !text.trim()) {
@@ -127,21 +130,38 @@ export function createSpeakCommand(): Command {
         return;
       }
 
-      // Play synchronously via afplay (macOS). On non-Mac hosts this would
-      // need a different player; for now we only support Mac because that's
-      // the only deployment target.
-      try {
-        execFileSync('afplay', [tmpFile], { stdio: 'inherit' });
-      } catch (err) {
-        console.error(chalk.red(`error: afplay failed: ${String(err)}`));
-        // Fall through to cleanup before exit
+      // Play via afplay (macOS). Default behavior: spawn detached so this
+      // command returns as soon as audio playback starts, not after it
+      // finishes. The audio plays in the background regardless of whether
+      // the parent process exits. This is critical for the channel-handler
+      // pipeline: the user sees the Telegram text reply as soon as Claude
+      // finishes generating, with audio playing alongside, instead of
+      // having to wait for the full audio playback duration before the
+      // text reply is sent.
+      //
+      // --wait reverts to the synchronous behavior for callers that
+      // genuinely need to block (e.g. a heartbeat task that needs the
+      // audio finished before continuing to the next step).
+      if (options.wait) {
+        try {
+          execFileSync('afplay', [tmpFile], { stdio: 'inherit' });
+        } catch (err) {
+          console.error(chalk.red(`error: afplay failed: ${String(err)}`));
+          try { unlinkSync(tmpFile); } catch { /* best-effort */ }
+          process.exit(1);
+        }
         try { unlinkSync(tmpFile); } catch { /* best-effort */ }
-        process.exit(1);
+      } else {
+        // Detached play: a tiny shell wrapper plays the file and removes
+        // it afterward. Detach + unref + ignore-stdio means the parent
+        // can exit immediately while the child continues independently.
+        const child = spawn(
+          'sh',
+          ['-c', `afplay "${tmpFile}" && rm -f "${tmpFile}"`],
+          { stdio: 'ignore', detached: true },
+        );
+        child.unref();
       }
-
-      // Cleanup temp file. Fire-and-forget — if this fails, /tmp will be
-      // cleaned by the OS eventually.
-      try { unlinkSync(tmpFile); } catch { /* best-effort */ }
     });
 
   return cmd;

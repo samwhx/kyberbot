@@ -27,6 +27,7 @@ import { join } from 'path';
 import { storeConversation } from '../../brain/store-conversation.js';
 import { buildChannelSystemPrompt } from './system-prompt.js';
 import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory } from './conversation-history.js';
+import { maybeSpeakReply } from '../../services/speak-on-reply.js';
 
 const logger = createLogger('channel');
 
@@ -133,6 +134,9 @@ export class WhatsAppChannel implements Channel {
 
             pushAssistantMessage(convoId, reply);
             await this.send(msg.key.remoteJid!, reply);
+
+            // Voice mode hook: see speak-on-reply.ts for rationale.
+            maybeSpeakReply(reply, this.root);
 
             // Fire-and-forget: store conversation in memory.
             // (Previous `skipEmbeddings: true` was a no-op — the option was

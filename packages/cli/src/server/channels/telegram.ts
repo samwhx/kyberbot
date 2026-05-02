@@ -23,6 +23,7 @@ import { Channel, ChannelMessage } from './types.js';
 import { storeConversation } from '../../brain/store-conversation.js';
 import { buildChannelSystemPrompt } from './system-prompt.js';
 import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, clearHistory } from './conversation-history.js';
+import { maybeSpeakReply } from '../../services/speak-on-reply.js';
 
 const logger = createLogger('telegram');
 
@@ -187,6 +188,12 @@ export class TelegramChannel implements Channel {
           } else {
             await ctx.reply(reply);
           }
+
+          // Voice mode hook: if user has voice mode enabled, spawn a
+          // detached `kyberbot speak` to play this reply through Mac
+          // speakers. Runs in parallel with the user reading the text;
+          // does not block the reply path. See speak-on-reply.ts.
+          maybeSpeakReply(reply, this.root);
 
           // Fire-and-forget: store conversation in memory.
           // (Previous `skipEmbeddings: true` was a no-op — the option was
