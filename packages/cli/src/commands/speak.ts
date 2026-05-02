@@ -53,8 +53,8 @@ export function createSpeakCommand(): Command {
     )
     .option(
       '-m, --model <name>',
-      `model: ${VALID_MODELS.join(' | ')}`,
-      'tts-1-hd',
+      `model: ${VALID_MODELS.join(' | ')} (default: tts-1 — half the latency of tts-1-hd; use --model tts-1-hd for highest fidelity)`,
+      'tts-1',
     )
     .option('--dry-run', 'generate audio file but do not play it')
     .action(async (text: string, options: SpeakOptions) => {
