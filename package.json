@@ -9,7 +9,9 @@
     "packages/web"
   ],
   "scripts": {
-    "build": "pnpm -r run build",
+    "build": "npm run build --workspaces --if-present",
+    "build:cli": "npm run build --workspace=@kyberbot/cli",
+    "build:web": "npm run build --workspace=@kyberbot/web",
     "clean": "rm -rf packages/*/dist",
     "lint": "eslint",
     "typecheck": "tsc --noEmit -p packages/cli/tsconfig.json",

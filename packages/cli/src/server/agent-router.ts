@@ -41,11 +41,23 @@ export function mountWebUi(app: { use: (...args: any[]) => any; get: (...args: a
           res.sendFile(join(distPath, 'index.html'));
         });
         logger.debug(`Web UI available at ${prefix || '/'}/ui`);
-        break;
+        return;
       }
     }
+
+    // No dist found at any path. Without a loud warning, the operator hits
+    // /ui in the browser and gets the auth-protected catch-all's 401 JSON
+    // with no clue why the React app isn't rendering. This was a real
+    // first-deploy footgun. Tell them what to do.
+    logger.warn(
+      `Web UI dist not found — /ui will fall through to the API and return 401 ` +
+      `instead of the login screen. To fix: ` +
+      `\`cd <kyberbot-source>/packages/web && npm install && npm run build\` ` +
+      `(or \`npm run build\` from the kyberbot repo root after the build-script fix).`
+    );
+    logger.warn(`Searched: ${webDistPaths.join(' :: ')}`);
   } catch (err) {
-    logger.debug('Web UI not available', { error: String(err) });
+    logger.warn('Web UI mount failed', { error: String(err) });
   }
 }
 
