@@ -16,6 +16,7 @@ import { getAgentName, getRoot } from '../../config.js';
 import { loadInstalledSkills } from '../../skills/loader.js';
 import { loadInstalledAgents } from '../../agents/loader.js';
 import { getRecentActivity } from '../../brain/timeline.js';
+import { hybridSearch } from '../../brain/hybrid-search.js';
 import { createLogger } from '../../logger.js';
 
 const logger = createLogger('system-prompt');
@@ -38,7 +39,10 @@ export function setPendingNotificationsGetter(getter: (agentName: string) => Arr
  * Includes: identity, personality, user context, operational knowledge,
  * and recent cross-channel activity for continuity.
  */
-export async function buildChannelSystemPrompt(channel: 'telegram' | 'whatsapp' | 'web'): Promise<string> {
+export async function buildChannelSystemPrompt(
+  channel: 'telegram' | 'whatsapp' | 'web',
+  userMessage?: string
+): Promise<string> {
   const agentName = getAgentName();
   const root = getRoot();
   const parts: string[] = [];
@@ -207,6 +211,40 @@ export async function buildChannelSystemPrompt(channel: 'telegram' | 'whatsapp' 
         parts.push('\nReview these and take action if relevant to the current conversation.\n');
       }
     } catch {}
+  }
+
+  // Pre-fetched memory — runs hybridSearch on the user's current message
+  // BEFORE the Claude subprocess boots. Saves ~3-5s vs. having Claude run
+  // `kyberbot recall/search` as tool calls inside its turn.
+  //
+  // The "ALWAYS query memory first" rule in CLAUDE.md still applies — but
+  // for the current message, this section satisfies it. The agent should
+  // only run additional memory tool calls when (a) results below are empty
+  // or off-topic, or (b) the conversation has shifted to a new topic that
+  // wasn't in the original message.
+  if (userMessage && userMessage.trim().length >= 3) {
+    try {
+      const memResults = await hybridSearch(userMessage, root, {
+        limit: 5,
+        rerank: false,
+        includeRelated: true,
+      });
+      if (memResults.length > 0) {
+        parts.push('\n## Relevant Memory (pre-fetched)\n');
+        parts.push('The following memories were retrieved automatically based on the user\'s current message. Use this as your primary context — you do NOT need to run `kyberbot recall` or `kyberbot search` for this message unless the topic has shifted or these results are clearly off-target.\n');
+        for (const r of memResults) {
+          const time = formatRelativeTime(r.timestamp);
+          const snippet = r.content.length > 400
+            ? r.content.slice(0, 397) + '...'
+            : r.content;
+          parts.push(`- **${r.title}** (${time}, ${r.type})`);
+          parts.push(`  ${snippet}`);
+        }
+        parts.push('');
+      }
+    } catch (err) {
+      logger.debug('Pre-fetch memory failed', { error: String(err) });
+    }
   }
 
   // Load recent cross-channel activity for continuity between sessions

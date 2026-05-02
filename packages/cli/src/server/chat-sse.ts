@@ -127,7 +127,7 @@ export async function chatSseHandler(req: Request, res: Response, root: string) 
   // Build system prompt
   let systemPrompt: string;
   try {
-    systemPrompt = await buildChannelSystemPrompt('web');
+    systemPrompt = await buildChannelSystemPrompt('web', prompt);
   } catch (err) {
     logger.error('Failed to build system prompt', { error: String(err) });
     sendEvent(res, 'error', { message: 'Failed to build system prompt' });

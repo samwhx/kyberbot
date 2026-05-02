@@ -112,7 +112,7 @@ export class WhatsAppChannel implements Channel {
           try {
             const client = getClaudeClient();
             const prompt = buildPromptWithHistory(convoId, text);
-            const systemPrompt = await buildChannelSystemPrompt('whatsapp');
+            const systemPrompt = await buildChannelSystemPrompt('whatsapp', text);
             const reply = await client.complete(prompt, {
               system: systemPrompt,
               maxTurns: 30,
