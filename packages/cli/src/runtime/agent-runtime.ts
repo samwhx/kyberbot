@@ -19,6 +19,7 @@ import { Channel } from '../server/channels/types.js';
 import { ServiceHandle } from '../types.js';
 import { IdentityConfig } from '../types.js';
 import { AgentBus } from './agent-bus.js';
+import { initWarmPool, shutdownWarmPool, isWarmPoolEnabled } from './warm-claude-pool.js';
 
 const logger = createLogger('agent-runtime');
 
@@ -81,6 +82,15 @@ export class AgentRuntime {
   async start(): Promise<void> {
     logger.info(`Starting agent: ${this.name}`, { root: this.root });
     this.startedAt = Date.now();
+
+    // Initialize warm Claude pool if enabled. The pool keeps long-lived
+    // `claude --print` subprocesses across channel turns to skip the ~3-5s
+    // CLI startup cost on warm messages. Off by default; opt in via env or
+    // identity.yaml: claude.warm_pool.
+    if (isWarmPoolEnabled(this.identity.claude?.warm_pool)) {
+      initWarmPool();
+      logger.info(`Warm Claude pool enabled for ${this.name}`);
+    }
 
     // Initialize embeddings collection for this agent
     try {
@@ -204,6 +214,13 @@ export class AgentRuntime {
     // Unregister from bus
     if (this.bus) {
       this.bus.unregisterAgent(this.name);
+    }
+
+    // Shut down warm pool (kills any live claude subprocesses).
+    try {
+      await shutdownWarmPool();
+    } catch (error) {
+      logger.debug('Warm pool shutdown failed', { error: String(error) });
     }
 
     this._status = 'stopped';

@@ -21,8 +21,9 @@ import { getClaudeClient } from '../../claude.js';
 import { getAgentNameForRoot } from '../../config.js';
 import { Channel, ChannelMessage } from './types.js';
 import { storeConversation } from '../../brain/store-conversation.js';
-import { buildChannelSystemPrompt } from './system-prompt.js';
-import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, clearHistory } from './conversation-history.js';
+import { buildChannelSystemPrompt, buildStaticChannelSystemPrompt, buildPerTurnContextBlock } from './system-prompt.js';
+import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, clearHistory, escapeForXml } from './conversation-history.js';
+import { isWarmPoolEnabled, getWarmPool } from '../../runtime/warm-claude-pool.js';
 import { maybeSpeakReply } from '../../services/speak-on-reply.js';
 
 const logger = createLogger('telegram');
@@ -129,7 +130,11 @@ export class TelegramChannel implements Channel {
 
       // ── Handle /start after verification ───────────────────────────────
       if (text === '/start') {
-        clearHistory(`telegram:${chatId}`);
+        const convoKey = `telegram:${chatId}`;
+        clearHistory(convoKey);
+        // Recycle any warm session so the next turn starts fresh.
+        const pool = getWarmPool();
+        if (pool) pool.recycle(convoKey);
         const agentName = getAgentNameForRoot(this.root);
         const greeting = this.loadGreeting(agentName);
         await ctx.reply(greeting);
@@ -156,12 +161,32 @@ export class TelegramChannel implements Channel {
         const convoId = `telegram:${chatId}`;
         try {
           const client = getClaudeClient();
-          const prompt = buildPromptWithHistory(convoId, text);
-          const systemPrompt = await buildChannelSystemPrompt('telegram', text);
+
+          // Choose path: warm pool (faster, claude tracks history in-process)
+          // vs one-shot subprocess (legacy, our conversation-history.ts).
+          const useWarmPool = isWarmPoolEnabled();
+          let prompt: string;
+          let systemPrompt: string | undefined;
+          let warmPoolKey: string | undefined;
+          let buildSystemPrompt: (() => Promise<string>) | undefined;
+
+          if (useWarmPool) {
+            const ctxBlock = await buildPerTurnContextBlock('telegram', text);
+            const ctx = ctxBlock.trim() ? `<context>\n${ctxBlock}\n</context>\n\n` : '';
+            prompt = `${ctx}<user_message>${escapeForXml(text)}</user_message>`;
+            warmPoolKey = convoId;
+            buildSystemPrompt = () => buildStaticChannelSystemPrompt('telegram');
+          } else {
+            prompt = buildPromptWithHistory(convoId, text);
+            systemPrompt = await buildChannelSystemPrompt('telegram', text);
+          }
+
           const reply = await client.complete(prompt, {
             system: systemPrompt,
+            warmPoolKey,
+            buildSystemPrompt,
             maxTurns: 30,
-            subprocess: true,
+            subprocess: !useWarmPool,
             cwd: this.root,
             // Telegram messages reach Claude as untrusted text. 'broad' allows
             // memory edits and `kyberbot` CLI commands but blocks arbitrary

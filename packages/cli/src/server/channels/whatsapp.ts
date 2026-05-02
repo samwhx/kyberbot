@@ -25,8 +25,9 @@ import { getClaudeClient } from '../../claude.js';
 import { Channel, ChannelMessage } from './types.js';
 import { join } from 'path';
 import { storeConversation } from '../../brain/store-conversation.js';
-import { buildChannelSystemPrompt } from './system-prompt.js';
-import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory } from './conversation-history.js';
+import { buildChannelSystemPrompt, buildStaticChannelSystemPrompt, buildPerTurnContextBlock } from './system-prompt.js';
+import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, escapeForXml } from './conversation-history.js';
+import { isWarmPoolEnabled } from '../../runtime/warm-claude-pool.js';
 import { maybeSpeakReply } from '../../services/speak-on-reply.js';
 
 const logger = createLogger('channel');
@@ -111,12 +112,30 @@ export class WhatsAppChannel implements Channel {
           const convoId = `whatsapp:${msg.key.remoteJid}`;
           try {
             const client = getClaudeClient();
-            const prompt = buildPromptWithHistory(convoId, text);
-            const systemPrompt = await buildChannelSystemPrompt('whatsapp', text);
+
+            const useWarmPool = isWarmPoolEnabled();
+            let prompt: string;
+            let systemPrompt: string | undefined;
+            let warmPoolKey: string | undefined;
+            let buildSystemPrompt: (() => Promise<string>) | undefined;
+
+            if (useWarmPool) {
+              const ctxBlock = await buildPerTurnContextBlock('whatsapp', text);
+              const ctx = ctxBlock.trim() ? `<context>\n${ctxBlock}\n</context>\n\n` : '';
+              prompt = `${ctx}<user_message>${escapeForXml(text)}</user_message>`;
+              warmPoolKey = convoId;
+              buildSystemPrompt = () => buildStaticChannelSystemPrompt('whatsapp');
+            } else {
+              prompt = buildPromptWithHistory(convoId, text);
+              systemPrompt = await buildChannelSystemPrompt('whatsapp', text);
+            }
+
             const reply = await client.complete(prompt, {
               system: systemPrompt,
+              warmPoolKey,
+              buildSystemPrompt,
               maxTurns: 30,
-              subprocess: true,
+              subprocess: !useWarmPool,
               cwd: this.root,
               // WhatsApp messages are untrusted (and currently have weak
               // sender verification — see channels/whatsapp.ts head comment).

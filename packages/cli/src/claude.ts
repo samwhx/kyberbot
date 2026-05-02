@@ -59,6 +59,22 @@ export interface CompleteOptions {
    */
   subprocess?: boolean;
   /**
+   * If set AND the warm pool is initialized, route this call through the
+   * pool instead of spawning a one-shot subprocess. Saves ~3-5s on warm
+   * turns. Only meaningful for channel handlers — heartbeat / sleep /
+   * brain ops should not set this (they each run in a different cwd or
+   * with a different system prompt, and pooling buys nothing).
+   *
+   * When using the pool, pass `buildSystemPrompt` instead of `system`.
+   */
+  warmPoolKey?: string;
+  /**
+   * Lazy system-prompt builder used by the warm pool. Only invoked on a
+   * cold spawn (or recycle). Must be byte-stable for hash-based drift
+   * detection.
+   */
+  buildSystemPrompt?: () => Promise<string>;
+  /**
    * Working directory for the spawned `claude` process. Claude Code
    * attributes session files to the project corresponding to this
    * directory. In fleet mode the parent process has one CWD shared
@@ -131,6 +147,41 @@ export class ClaudeClient {
     // Always resolve model — never let subprocess/agent-sdk fall back to CLI defaults
     if (!opts.model) {
       opts.model = (getClaudeModel() || 'opus') as 'haiku' | 'sonnet' | 'opus';
+    }
+
+    // Warm pool: when caller has supplied a pool key AND the pool is up,
+    // route through it instead of spawning a one-shot subprocess. On any
+    // pool error we fall through to the existing subprocess path.
+    if (opts.warmPoolKey && opts.buildSystemPrompt) {
+      const { getWarmPool } = await import('./runtime/warm-claude-pool.js');
+      const pool = getWarmPool();
+      if (pool) {
+        try {
+          return await pool.turn(prompt, {
+            key: opts.warmPoolKey,
+            buildSystemPrompt: opts.buildSystemPrompt,
+            cwd: opts.cwd ?? getRoot(),
+            toolPolicy: opts.tools ?? 'narrow',
+            model: opts.model,
+            maxTurns: opts.maxTurns ?? 30,
+            onChunk: opts.onChunk,
+          });
+        } catch (err) {
+          logger.warn('warm pool turn failed; falling back to one-shot subprocess', {
+            key: opts.warmPoolKey,
+            error: String(err),
+          });
+          // Fall through to one-shot subprocess. Build system prompt eagerly
+          // since the pool builder was lazy.
+          if (!opts.system) {
+            try { opts.system = await opts.buildSystemPrompt(); } catch { /* ignore */ }
+          }
+        }
+      } else if (!opts.system) {
+        // Pool disabled and no system provided — build it eagerly so the
+        // subprocess fallback has a system prompt.
+        try { opts.system = await opts.buildSystemPrompt(); } catch { /* ignore */ }
+      }
     }
 
     // All server-process calls should use subprocess for memory isolation.

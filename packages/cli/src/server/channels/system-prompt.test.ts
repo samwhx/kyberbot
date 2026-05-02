@@ -273,7 +273,10 @@ describe('system-prompt', () => {
       ] as any);
 
       const prompt = await buildChannelSystemPrompt('telegram');
-      expect(prompt).toContain('Recent Activity (Cross-Channel)');
+      // Per-turn context block now wraps recent activity. The header is
+      // 'Recent activity across channels:' (lowercase) and lives in a
+      // ## Current-Turn Context section appended to the system prompt.
+      expect(prompt).toContain('Recent activity across channels');
       expect(prompt).toContain('Deployed KyberCo');
       expect(prompt).toContain('[KyberCo]');
       expect(prompt).toContain('Successful deployment');
@@ -316,7 +319,8 @@ describe('system-prompt', () => {
       vi.mocked(getRecentActivity).mockResolvedValue([]);
 
       const prompt = await buildChannelSystemPrompt('telegram');
-      expect(prompt).not.toContain('Recent Activity');
+      // No recent activity entries → activity section omitted from per-turn block.
+      expect(prompt).not.toContain('Recent activity across channels');
     });
 
     it('should gracefully handle timeline errors', async () => {

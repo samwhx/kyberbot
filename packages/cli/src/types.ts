@@ -68,6 +68,13 @@ export interface IdentityConfig {
   claude?: {
     mode: 'subscription' | 'sdk';
     model?: string;
+    /**
+     * Enable the warm Claude subprocess pool for messaging channels
+     * (Telegram, WhatsApp). Trades ~200MB resident per chat session for
+     * ~3-5s saved on warm turns (subsequent messages within ~30 min of
+     * each other). Default off — opt in here or via `KYBERBOT_WARM_POOL=1`.
+     */
+    warm_pool?: boolean;
   };
   /**
    * Hybrid-search rerank provider. Defaults to 'openai' when OPENAI_API_KEY
