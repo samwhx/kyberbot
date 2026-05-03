@@ -65,8 +65,10 @@ export async function startServer(options: {
     try {
       const identity = getIdentity();
 
-      if (identity.channels?.telegram?.bot_token) {
-        const telegram = new TelegramChannel(identity.channels.telegram, root);
+      const tgToken = process.env.TELEGRAM_BOT_TOKEN || identity.channels?.telegram?.bot_token;
+      if (tgToken) {
+        const tgConfig = { ...(identity.channels?.telegram ?? {}), bot_token: tgToken };
+        const telegram = new TelegramChannel(tgConfig, root);
         await telegram.start();
         channels.push(telegram);
       }

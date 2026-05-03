@@ -113,8 +113,13 @@ export class AgentRuntime {
 
     // Start channels if configured
     try {
-      if (this.identity.channels?.telegram?.bot_token) {
-        const telegram = new TelegramChannel(this.identity.channels.telegram, this.root);
+      // Telegram bot_token can come from env (preferred — keeps secrets out
+      // of identity.yaml so it's safe to commit) or from identity.yaml as
+      // a fallback for legacy configs.
+      const tgToken = process.env.TELEGRAM_BOT_TOKEN || this.identity.channels?.telegram?.bot_token;
+      if (tgToken) {
+        const tgConfig = { ...(this.identity.channels?.telegram ?? {}), bot_token: tgToken };
+        const telegram = new TelegramChannel(tgConfig, this.root);
         await telegram.start();
         this.channels.push(telegram);
       }

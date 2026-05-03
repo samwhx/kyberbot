@@ -46,7 +46,12 @@ export interface IdentityConfig {
   };
   channels?: {
     telegram?: {
-      bot_token: string;
+      /**
+       * Bot token. Preferred location: `TELEGRAM_BOT_TOKEN` env var (so the
+       * token never lands in a committed identity.yaml). YAML fallback is
+       * supported for legacy configs but discouraged.
+       */
+      bot_token?: string;
       owner_chat_id?: number;
     };
     whatsapp?: {

@@ -54,7 +54,7 @@ export class WhatsAppChannel implements Channel {
     }
     try {
       const baileys = await import('@whiskeysockets/baileys');
-      const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = baileys;
+      const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, jidNormalizedUser } = baileys;
 
       const authDir = join(this.root, 'data', 'whatsapp-auth');
       const { state, saveCreds } = await useMultiFileAuthState(authDir);
@@ -145,12 +145,40 @@ export class WhatsAppChannel implements Channel {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
-        // Hard owner-JID check — drop everything else silently.
-        const senderJid = msg.key.remoteJid;
-        if (senderJid !== this.ownerJid) {
-          logger.debug(`Ignored WhatsApp message from non-owner JID ${senderJid}`);
+        // Owner-JID check. WhatsApp routes some messages via LID (Linked ID)
+        // instead of phone-number JID, especially after May 2025. msg.key
+        // can carry: remoteJid, participant, participantPn, senderPn — we
+        // accept the message if ANY of those normalizes to the owner's JID.
+        // We also accept @lid form if the sender's pushName / participantPn
+        // resolves to the owner's phone number.
+        const candidates: string[] = [
+          msg.key.remoteJid,
+          msg.key.participant,
+          msg.key.participantPn,
+          (msg.key as any).senderPn,
+          (msg as any).participantPn,
+        ].filter((j): j is string => typeof j === 'string' && j.length > 0);
+
+        const ownerJidNorm = this.ownerJid ? jidNormalizedUser(this.ownerJid) : null;
+        const ownerPhone = ownerJidNorm?.split('@')[0] ?? null;
+        const normalized = candidates.map(jidNormalizedUser);
+        const matched = normalized.find(j => j === ownerJidNorm) ||
+          // also accept any candidate whose user-portion matches owner phone
+          (ownerPhone ? normalized.find(j => j.split('@')[0] === ownerPhone) : null);
+
+        if (!matched) {
+          logger.info('WhatsApp: dropping message from non-owner', {
+            candidates,
+            expectedOwner: ownerJidNorm,
+            keyDump: msg.key,
+            pushName: msg.pushName,
+          });
           return;
         }
+        logger.info('WhatsApp: accepted message from owner', {
+          matched,
+          pushName: msg.pushName,
+        });
 
         const text = msg.message.conversation ||
           msg.message.extendedTextMessage?.text || '';
