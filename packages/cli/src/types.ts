@@ -46,7 +46,12 @@ export interface IdentityConfig {
   };
   channels?: {
     telegram?: {
-      bot_token: string;
+      /**
+       * Bot token. Preferred location: `TELEGRAM_BOT_TOKEN` env var (so the
+       * token never lands in a committed identity.yaml). YAML fallback is
+       * supported for legacy configs but discouraged.
+       */
+      bot_token?: string;
       owner_chat_id?: number;
     };
     whatsapp?: {
@@ -57,6 +62,13 @@ export interface IdentityConfig {
        * `<groupId>@g.us` (group). Set manually in identity.yaml.
        */
       owner_jid?: string;
+      /**
+       * Phone number being linked (the "Alfred" WhatsApp account, NOT the
+       * owner). Country code + digits, no `+`, e.g. "6512345678". When set,
+       * the channel uses pairing-code flow instead of QR — Baileys' QR flow
+       * has been broken since Feb 2026 due to upstream bugs.
+       */
+      linked_phone?: string;
     };
   };
   backup?: {
@@ -68,6 +80,13 @@ export interface IdentityConfig {
   claude?: {
     mode: 'subscription' | 'sdk';
     model?: string;
+    /**
+     * Enable the warm Claude subprocess pool for messaging channels
+     * (Telegram, WhatsApp). Trades ~200MB resident per chat session for
+     * ~3-5s saved on warm turns (subsequent messages within ~30 min of
+     * each other). Default off — opt in here or via `KYBERBOT_WARM_POOL=1`.
+     */
+    warm_pool?: boolean;
   };
   /**
    * Hybrid-search rerank provider. Defaults to 'openai' when OPENAI_API_KEY

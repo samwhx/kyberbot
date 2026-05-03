@@ -84,7 +84,7 @@ export function buildPromptWithHistory(conversationId: string, currentMessage: s
  * Conservative — replace `<`, `>`, and `&` with their entity forms in user
  * input. Claude's tokenizer reads the entities fine.
  */
-function escapeForXml(text: string): string {
+export function escapeForXml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')

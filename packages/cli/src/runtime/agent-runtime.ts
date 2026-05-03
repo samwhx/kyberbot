@@ -19,6 +19,7 @@ import { Channel } from '../server/channels/types.js';
 import { ServiceHandle } from '../types.js';
 import { IdentityConfig } from '../types.js';
 import { AgentBus } from './agent-bus.js';
+import { initWarmPool, shutdownWarmPool, isWarmPoolEnabled } from './warm-claude-pool.js';
 
 const logger = createLogger('agent-runtime');
 
@@ -82,6 +83,15 @@ export class AgentRuntime {
     logger.info(`Starting agent: ${this.name}`, { root: this.root });
     this.startedAt = Date.now();
 
+    // Initialize warm Claude pool if enabled. The pool keeps long-lived
+    // `claude --print` subprocesses across channel turns to skip the ~3-5s
+    // CLI startup cost on warm messages. Off by default; opt in via env or
+    // identity.yaml: claude.warm_pool.
+    if (isWarmPoolEnabled(this.identity.claude?.warm_pool)) {
+      initWarmPool();
+      logger.info(`Warm Claude pool enabled for ${this.name}`);
+    }
+
     // Initialize embeddings collection for this agent
     try {
       this.embeddingsReady = await initializeEmbeddings(this.root);
@@ -103,15 +113,21 @@ export class AgentRuntime {
 
     // Start channels if configured
     try {
-      if (this.identity.channels?.telegram?.bot_token) {
-        const telegram = new TelegramChannel(this.identity.channels.telegram, this.root);
+      // Telegram bot_token can come from env (preferred — keeps secrets out
+      // of identity.yaml so it's safe to commit) or from identity.yaml as
+      // a fallback for legacy configs.
+      const tgToken = process.env.TELEGRAM_BOT_TOKEN || this.identity.channels?.telegram?.bot_token;
+      if (tgToken) {
+        const tgConfig = { ...(this.identity.channels?.telegram ?? {}), bot_token: tgToken };
+        const telegram = new TelegramChannel(tgConfig, this.root);
         await telegram.start();
         this.channels.push(telegram);
       }
 
       if (this.identity.channels?.whatsapp?.enabled) {
         const ownerJid = this.identity.channels.whatsapp.owner_jid || null;
-        const whatsapp = new WhatsAppChannel(this.root, ownerJid);
+        const linkedPhone = this.identity.channels.whatsapp.linked_phone || null;
+        const whatsapp = new WhatsAppChannel(this.root, ownerJid, linkedPhone);
         await whatsapp.start();
         this.channels.push(whatsapp);
       }
@@ -204,6 +220,13 @@ export class AgentRuntime {
     // Unregister from bus
     if (this.bus) {
       this.bus.unregisterAgent(this.name);
+    }
+
+    // Shut down warm pool (kills any live claude subprocesses).
+    try {
+      await shutdownWarmPool();
+    } catch (error) {
+      logger.debug('Warm pool shutdown failed', { error: String(error) });
     }
 
     this._status = 'stopped';

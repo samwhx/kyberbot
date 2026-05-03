@@ -25,8 +25,9 @@ import { getClaudeClient } from '../../claude.js';
 import { Channel, ChannelMessage } from './types.js';
 import { join } from 'path';
 import { storeConversation } from '../../brain/store-conversation.js';
-import { buildChannelSystemPrompt } from './system-prompt.js';
-import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory } from './conversation-history.js';
+import { buildChannelSystemPrompt, buildStaticChannelSystemPrompt, buildPerTurnContextBlock } from './system-prompt.js';
+import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, escapeForXml } from './conversation-history.js';
+import { isWarmPoolEnabled } from '../../runtime/warm-claude-pool.js';
 import { maybeSpeakReply } from '../../services/speak-on-reply.js';
 
 const logger = createLogger('channel');
@@ -37,7 +38,11 @@ export class WhatsAppChannel implements Channel {
   private connected = false;
   private messageHandler: ((message: ChannelMessage) => Promise<void>) | null = null;
 
-  constructor(private root: string, private ownerJid: string | null = null) {}
+  constructor(
+    private root: string,
+    private ownerJid: string | null = null,
+    private linkedPhone: string | null = null,
+  ) {}
 
   async start(): Promise<void> {
     if (!this.ownerJid) {
@@ -49,21 +54,80 @@ export class WhatsAppChannel implements Channel {
     }
     try {
       const baileys = await import('@whiskeysockets/baileys');
-      const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = baileys;
+      const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, jidNormalizedUser } = baileys;
 
       const authDir = join(this.root, 'data', 'whatsapp-auth');
       const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
+      // The actual root cause of "Connection Failure" at noise-handshake:
+      // Baileys hard-codes an outdated WhatsApp Web version (~2.3000.10232…)
+      // which WhatsApp's servers reject. Verified by probing locally —
+      // dynamic fetch returns ~2.3000.10351… which passes the handshake.
+      // Cache for 12h to avoid refetching on every reconnect.
+      let version: [number, number, number] | undefined;
+      try {
+        const fetched = await fetchLatestBaileysVersion();
+        version = fetched.version;
+        logger.info(`Using WhatsApp Web version ${version.join('.')} (fetched, isLatest=${fetched.isLatest})`);
+      } catch (err) {
+        logger.warn('fetchLatestBaileysVersion failed; using Baileys default (likely to fail handshake)', { error: String(err) });
+      }
+
+      // - `browser` is the device fingerprint shown in WhatsApp's linked-devices list.
+      // - `defaultQueryTimeoutMs: undefined` is required during pairing-code flow.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.sock = (makeWASocket as any)({
         auth: state,
-        printQRInTerminal: true,
+        version,
+        browser: ['Mac OS', 'Chrome', '14.4.1'],
+        defaultQueryTimeoutMs: undefined,
       });
 
       this.sock.ev.on('creds.update', saveCreds);
 
-      this.sock.ev.on('connection.update', (update: any) => {
-        const { connection, lastDisconnect } = update;
+      // Track whether we've already requested a pairing code this session
+      // so reconnects don't spam new codes.
+      let pairingCodeRequested = false;
+
+      this.sock.ev.on('connection.update', async (update: any) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        // qr arriving = unauthenticated. Use pairing code if we have a phone.
+        // Don't gate on authState.creds.registered — its shape varies and
+        // Baileys only emits qr events when not yet registered anyway.
+        if (qr && this.linkedPhone && !pairingCodeRequested) {
+          pairingCodeRequested = true;
+          try {
+            const code: string = await this.sock.requestPairingCode(this.linkedPhone);
+            const formatted = code.match(/.{1,4}/g)?.join('-') ?? code;
+            // eslint-disable-next-line no-console
+            console.log('\n  ─────────────────────────────────────────────────');
+            // eslint-disable-next-line no-console
+            console.log(`  WhatsApp Pairing Code:  ${formatted}`);
+            // eslint-disable-next-line no-console
+            console.log('  ─────────────────────────────────────────────────');
+            // eslint-disable-next-line no-console
+            console.log(`  On the phone with WhatsApp number ${this.linkedPhone}:`);
+            // eslint-disable-next-line no-console
+            console.log('    1. WhatsApp → Settings → Linked Devices');
+            // eslint-disable-next-line no-console
+            console.log('    2. Tap "Link a Device" → "Link with phone number instead"');
+            // eslint-disable-next-line no-console
+            console.log(`    3. Enter ${this.linkedPhone}, then enter the code above`);
+            // eslint-disable-next-line no-console
+            console.log('  ─────────────────────────────────────────────────\n');
+            logger.info('WhatsApp pairing code generated — code valid ~60s');
+          } catch (err) {
+            logger.error('Failed to request pairing code; falling back to QR', { error: String(err) });
+            await this.renderQrFallback(qr);
+            pairingCodeRequested = false;  // allow retry on next qr
+          }
+        } else if (qr) {
+          // No linked_phone configured → QR fallback (likely broken on
+          // current WhatsApp, but emit so user sees it).
+          await this.renderQrFallback(qr);
+        }
+
         if (connection === 'close') {
           const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
           logger.warn('WhatsApp connection closed', { shouldReconnect });
@@ -81,12 +145,40 @@ export class WhatsAppChannel implements Channel {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
-        // Hard owner-JID check — drop everything else silently.
-        const senderJid = msg.key.remoteJid;
-        if (senderJid !== this.ownerJid) {
-          logger.debug(`Ignored WhatsApp message from non-owner JID ${senderJid}`);
+        // Owner-JID check. WhatsApp routes some messages via LID (Linked ID)
+        // instead of phone-number JID, especially after May 2025. msg.key
+        // can carry: remoteJid, participant, participantPn, senderPn — we
+        // accept the message if ANY of those normalizes to the owner's JID.
+        // We also accept @lid form if the sender's pushName / participantPn
+        // resolves to the owner's phone number.
+        const candidates: string[] = [
+          msg.key.remoteJid,
+          msg.key.participant,
+          msg.key.participantPn,
+          (msg.key as any).senderPn,
+          (msg as any).participantPn,
+        ].filter((j): j is string => typeof j === 'string' && j.length > 0);
+
+        const ownerJidNorm = this.ownerJid ? jidNormalizedUser(this.ownerJid) : null;
+        const ownerPhone = ownerJidNorm?.split('@')[0] ?? null;
+        const normalized = candidates.map(jidNormalizedUser);
+        const matched = normalized.find(j => j === ownerJidNorm) ||
+          // also accept any candidate whose user-portion matches owner phone
+          (ownerPhone ? normalized.find(j => j.split('@')[0] === ownerPhone) : null);
+
+        if (!matched) {
+          logger.info('WhatsApp: dropping message from non-owner', {
+            candidates,
+            expectedOwner: ownerJidNorm,
+            keyDump: msg.key,
+            pushName: msg.pushName,
+          });
           return;
         }
+        logger.info('WhatsApp: accepted message from owner', {
+          matched,
+          pushName: msg.pushName,
+        });
 
         const text = msg.message.conversation ||
           msg.message.extendedTextMessage?.text || '';
@@ -111,12 +203,30 @@ export class WhatsAppChannel implements Channel {
           const convoId = `whatsapp:${msg.key.remoteJid}`;
           try {
             const client = getClaudeClient();
-            const prompt = buildPromptWithHistory(convoId, text);
-            const systemPrompt = await buildChannelSystemPrompt('whatsapp', text);
+
+            const useWarmPool = isWarmPoolEnabled();
+            let prompt: string;
+            let systemPrompt: string | undefined;
+            let warmPoolKey: string | undefined;
+            let buildSystemPrompt: (() => Promise<string>) | undefined;
+
+            if (useWarmPool) {
+              const ctxBlock = await buildPerTurnContextBlock('whatsapp', text);
+              const ctx = ctxBlock.trim() ? `<context>\n${ctxBlock}\n</context>\n\n` : '';
+              prompt = `${ctx}<user_message>${escapeForXml(text)}</user_message>`;
+              warmPoolKey = convoId;
+              buildSystemPrompt = () => buildStaticChannelSystemPrompt('whatsapp');
+            } else {
+              prompt = buildPromptWithHistory(convoId, text);
+              systemPrompt = await buildChannelSystemPrompt('whatsapp', text);
+            }
+
             const reply = await client.complete(prompt, {
               system: systemPrompt,
+              warmPoolKey,
+              buildSystemPrompt,
               maxTurns: 30,
-              subprocess: true,
+              subprocess: !useWarmPool,
               cwd: this.root,
               // WhatsApp messages are untrusted (and currently have weak
               // sender verification — see channels/whatsapp.ts head comment).
@@ -165,6 +275,25 @@ export class WhatsAppChannel implements Channel {
     }
     this.connected = false;
     logger.info('WhatsApp channel disconnected');
+  }
+
+  /**
+   * Render a QR via qrcode-terminal as a fallback when pairing code is not
+   * available or fails. Note: QR flow is currently broken on WhatsApp's
+   * server-side validation (Feb 2026 onward), so this is mostly diagnostic.
+   */
+  private async renderQrFallback(qr: string): Promise<void> {
+    try {
+      const qrcode = await import('qrcode-terminal');
+      // eslint-disable-next-line no-console
+      console.log('\n  Scan the QR below from the linked WhatsApp account:\n');
+      qrcode.default.generate(qr, { small: true });
+      logger.info('WhatsApp QR rendered (fallback path)');
+    } catch (err) {
+      logger.error('Failed to render QR fallback', { error: String(err) });
+      // eslint-disable-next-line no-console
+      console.log(`\n  WhatsApp QR payload (paste into any QR generator):\n  ${qr}\n`);
+    }
   }
 
   async send(jid: string, message: string): Promise<void> {
