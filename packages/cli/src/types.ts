@@ -57,6 +57,13 @@ export interface IdentityConfig {
        * `<groupId>@g.us` (group). Set manually in identity.yaml.
        */
       owner_jid?: string;
+      /**
+       * Phone number being linked (the "Alfred" WhatsApp account, NOT the
+       * owner). Country code + digits, no `+`, e.g. "6512345678". When set,
+       * the channel uses pairing-code flow instead of QR — Baileys' QR flow
+       * has been broken since Feb 2026 due to upstream bugs.
+       */
+      linked_phone?: string;
     };
   };
   backup?: {

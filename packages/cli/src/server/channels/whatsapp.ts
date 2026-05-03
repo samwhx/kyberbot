@@ -38,7 +38,11 @@ export class WhatsAppChannel implements Channel {
   private connected = false;
   private messageHandler: ((message: ChannelMessage) => Promise<void>) | null = null;
 
-  constructor(private root: string, private ownerJid: string | null = null) {}
+  constructor(
+    private root: string,
+    private ownerJid: string | null = null,
+    private linkedPhone: string | null = null,
+  ) {}
 
   async start(): Promise<void> {
     if (!this.ownerJid) {
@@ -50,44 +54,69 @@ export class WhatsAppChannel implements Channel {
     }
     try {
       const baileys = await import('@whiskeysockets/baileys');
-      const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = baileys;
+      const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = baileys;
 
       const authDir = join(this.root, 'data', 'whatsapp-auth');
       const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-      // WhatsApp servers (as of Feb 2026) reject UserAgent.Platform.WEB for new
-      // device pairing — Baileys' default `Browsers.ubuntu()` triggers a
-      // "Connection Failure" loop at noise-handshake registration. Switching to
-      // Browsers.macOS() sets Platform.MACOS which WhatsApp accepts.
-      // See: https://github.com/WhiskeySockets/Baileys/pull/2365 (closed but
-      // diagnoses the issue), and Baileys docs noting "When logging in using
-      // pairing code, you should only set a valid/logical browser config".
+      // QR flow has been broken since Feb 2026 due to upstream Baileys bugs
+      // (passive:true, lidDbMigrated, noise.finishInit race — see
+      // openclaw/openclaw#19907). Pairing-code flow works around all three
+      // through configuration alone.
+      //
+      // - `browser` set to bare ['Mac OS','Chrome','14.4.1'] tuple per the
+      //   community-confirmed config (NOT Browsers.macOS() — that returns
+      //   a slightly different tuple).
+      // - `defaultQueryTimeoutMs: undefined` is required during pairing —
+      //   the default times out the pairing-code request.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.sock = (makeWASocket as any)({
         auth: state,
-        browser: Browsers.macOS('Desktop'),
-        // printQRInTerminal removed — deprecated in 6.7.21+ and no longer
-        // actually prints. We render QR ourselves below from connection.update.
+        browser: ['Mac OS', 'Chrome', '14.4.1'],
+        defaultQueryTimeoutMs: undefined,
       });
 
       this.sock.ev.on('creds.update', saveCreds);
 
+      // Track whether we've already requested a pairing code this session
+      // so reconnects don't spam new codes.
+      let pairingCodeRequested = false;
+
       this.sock.ev.on('connection.update', async (update: any) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // Render QR codes ourselves — Baileys no longer prints them.
-        if (qr) {
+        // qr arriving = unauthenticated. Use pairing code if we have a phone.
+        if (qr && this.linkedPhone && !pairingCodeRequested && !this.sock.authState.creds.registered) {
+          pairingCodeRequested = true;
           try {
-            const qrcode = await import('qrcode-terminal');
+            const code: string = await this.sock.requestPairingCode(this.linkedPhone);
+            const formatted = code.match(/.{1,4}/g)?.join('-') ?? code;
             // eslint-disable-next-line no-console
-            console.log('\n  Scan the QR below from the WhatsApp account you are linking:\n');
-            qrcode.default.generate(qr, { small: true });
-            logger.info('WhatsApp QR code printed — scan from the linked phone within ~60s');
+            console.log('\n  ─────────────────────────────────────────────────');
+            // eslint-disable-next-line no-console
+            console.log(`  WhatsApp Pairing Code:  ${formatted}`);
+            // eslint-disable-next-line no-console
+            console.log('  ─────────────────────────────────────────────────');
+            // eslint-disable-next-line no-console
+            console.log(`  On the phone with WhatsApp number ${this.linkedPhone}:`);
+            // eslint-disable-next-line no-console
+            console.log('    1. WhatsApp → Settings → Linked Devices');
+            // eslint-disable-next-line no-console
+            console.log('    2. Tap "Link a Device" → "Link with phone number instead"');
+            // eslint-disable-next-line no-console
+            console.log(`    3. Enter ${this.linkedPhone}, then enter the code above`);
+            // eslint-disable-next-line no-console
+            console.log('  ─────────────────────────────────────────────────\n');
+            logger.info('WhatsApp pairing code generated — code valid ~60s');
           } catch (err) {
-            logger.error('Failed to render QR code', { error: String(err) });
-            // eslint-disable-next-line no-console
-            console.log(`\n  WhatsApp QR payload (paste into any QR generator):\n  ${qr}\n`);
+            logger.error('Failed to request pairing code; falling back to QR', { error: String(err) });
+            await this.renderQrFallback(qr);
+            pairingCodeRequested = false;  // allow retry on next qr
           }
+        } else if (qr) {
+          // No linked_phone configured → QR fallback (likely broken on
+          // current WhatsApp, but emit so user sees it).
+          await this.renderQrFallback(qr);
         }
 
         if (connection === 'close') {
@@ -209,6 +238,25 @@ export class WhatsAppChannel implements Channel {
     }
     this.connected = false;
     logger.info('WhatsApp channel disconnected');
+  }
+
+  /**
+   * Render a QR via qrcode-terminal as a fallback when pairing code is not
+   * available or fails. Note: QR flow is currently broken on WhatsApp's
+   * server-side validation (Feb 2026 onward), so this is mostly diagnostic.
+   */
+  private async renderQrFallback(qr: string): Promise<void> {
+    try {
+      const qrcode = await import('qrcode-terminal');
+      // eslint-disable-next-line no-console
+      console.log('\n  Scan the QR below from the linked WhatsApp account:\n');
+      qrcode.default.generate(qr, { small: true });
+      logger.info('WhatsApp QR rendered (fallback path)');
+    } catch (err) {
+      logger.error('Failed to render QR fallback', { error: String(err) });
+      // eslint-disable-next-line no-console
+      console.log(`\n  WhatsApp QR payload (paste into any QR generator):\n  ${qr}\n`);
+    }
   }
 
   async send(jid: string, message: string): Promise<void> {
