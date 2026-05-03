@@ -50,21 +50,46 @@ export class WhatsAppChannel implements Channel {
     }
     try {
       const baileys = await import('@whiskeysockets/baileys');
-      const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = baileys;
+      const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = baileys;
 
       const authDir = join(this.root, 'data', 'whatsapp-auth');
       const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
+      // WhatsApp servers (as of Feb 2026) reject UserAgent.Platform.WEB for new
+      // device pairing — Baileys' default `Browsers.ubuntu()` triggers a
+      // "Connection Failure" loop at noise-handshake registration. Switching to
+      // Browsers.macOS() sets Platform.MACOS which WhatsApp accepts.
+      // See: https://github.com/WhiskeySockets/Baileys/pull/2365 (closed but
+      // diagnoses the issue), and Baileys docs noting "When logging in using
+      // pairing code, you should only set a valid/logical browser config".
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.sock = (makeWASocket as any)({
         auth: state,
-        printQRInTerminal: true,
+        browser: Browsers.macOS('Desktop'),
+        // printQRInTerminal removed — deprecated in 6.7.21+ and no longer
+        // actually prints. We render QR ourselves below from connection.update.
       });
 
       this.sock.ev.on('creds.update', saveCreds);
 
-      this.sock.ev.on('connection.update', (update: any) => {
-        const { connection, lastDisconnect } = update;
+      this.sock.ev.on('connection.update', async (update: any) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        // Render QR codes ourselves — Baileys no longer prints them.
+        if (qr) {
+          try {
+            const qrcode = await import('qrcode-terminal');
+            // eslint-disable-next-line no-console
+            console.log('\n  Scan the QR below from the WhatsApp account you are linking:\n');
+            qrcode.default.generate(qr, { small: true });
+            logger.info('WhatsApp QR code printed — scan from the linked phone within ~60s');
+          } catch (err) {
+            logger.error('Failed to render QR code', { error: String(err) });
+            // eslint-disable-next-line no-console
+            console.log(`\n  WhatsApp QR payload (paste into any QR generator):\n  ${qr}\n`);
+          }
+        }
+
         if (connection === 'close') {
           const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
           logger.warn('WhatsApp connection closed', { shouldReconnect });
