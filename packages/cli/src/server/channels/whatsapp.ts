@@ -58,31 +58,13 @@ export class WhatsAppChannel implements Channel {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.sock = (makeWASocket as any)({
         auth: state,
-        // printQRInTerminal was deprecated in newer Baileys; we render the
-        // QR ourselves from connection.update events below.
+        printQRInTerminal: true,
       });
 
       this.sock.ev.on('creds.update', saveCreds);
 
-      this.sock.ev.on('connection.update', async (update: any) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        // Render QR codes ourselves (Baileys no longer prints them).
-        if (qr) {
-          try {
-            const qrcode = await import('qrcode-terminal');
-            // eslint-disable-next-line no-console
-            console.log('\n  Scan the QR below from your linked WhatsApp account:\n');
-            qrcode.default.generate(qr, { small: true });
-            logger.info('WhatsApp QR code printed — scan from the linked phone within ~60s');
-          } catch (err) {
-            logger.error('Failed to render QR code', { error: String(err) });
-            // Fallback: print the raw payload so user can use an external QR generator.
-            // eslint-disable-next-line no-console
-            console.log(`\n  WhatsApp QR payload (use any QR generator to scan):\n  ${qr}\n`);
-          }
-        }
-
+      this.sock.ev.on('connection.update', (update: any) => {
+        const { connection, lastDisconnect } = update;
         if (connection === 'close') {
           const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
           logger.warn('WhatsApp connection closed', { shouldReconnect });
