@@ -73,7 +73,8 @@ export async function startServer(options: {
 
       if (identity.channels?.whatsapp?.enabled) {
         const ownerJid = identity.channels.whatsapp.owner_jid || null;
-        const whatsapp = new WhatsAppChannel(root, ownerJid);
+        const linkedPhone = identity.channels.whatsapp.linked_phone || null;
+        const whatsapp = new WhatsAppChannel(root, ownerJid, linkedPhone);
         await whatsapp.start();
         channels.push(whatsapp);
       }

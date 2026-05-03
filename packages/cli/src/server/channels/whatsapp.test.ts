@@ -60,6 +60,7 @@ vi.mock('@whiskeysockets/baileys', () => ({
   default: vi.fn(() => mockSock),
   useMultiFileAuthState: mockUseMultiFileAuthState,
   DisconnectReason: { loggedOut: 401 },
+  fetchLatestBaileysVersion: vi.fn(async () => ({ version: [2, 3000, 0], isLatest: true })),
 }));
 
 const { WhatsAppChannel } = await import('./whatsapp.js');

@@ -54,24 +54,31 @@ export class WhatsAppChannel implements Channel {
     }
     try {
       const baileys = await import('@whiskeysockets/baileys');
-      const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = baileys;
+      const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = baileys;
 
       const authDir = join(this.root, 'data', 'whatsapp-auth');
       const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-      // QR flow has been broken since Feb 2026 due to upstream Baileys bugs
-      // (passive:true, lidDbMigrated, noise.finishInit race — see
-      // openclaw/openclaw#19907). Pairing-code flow works around all three
-      // through configuration alone.
-      //
-      // - `browser` set to bare ['Mac OS','Chrome','14.4.1'] tuple per the
-      //   community-confirmed config (NOT Browsers.macOS() — that returns
-      //   a slightly different tuple).
-      // - `defaultQueryTimeoutMs: undefined` is required during pairing —
-      //   the default times out the pairing-code request.
+      // The actual root cause of "Connection Failure" at noise-handshake:
+      // Baileys hard-codes an outdated WhatsApp Web version (~2.3000.10232…)
+      // which WhatsApp's servers reject. Verified by probing locally —
+      // dynamic fetch returns ~2.3000.10351… which passes the handshake.
+      // Cache for 12h to avoid refetching on every reconnect.
+      let version: [number, number, number] | undefined;
+      try {
+        const fetched = await fetchLatestBaileysVersion();
+        version = fetched.version;
+        logger.info(`Using WhatsApp Web version ${version.join('.')} (fetched, isLatest=${fetched.isLatest})`);
+      } catch (err) {
+        logger.warn('fetchLatestBaileysVersion failed; using Baileys default (likely to fail handshake)', { error: String(err) });
+      }
+
+      // - `browser` is the device fingerprint shown in WhatsApp's linked-devices list.
+      // - `defaultQueryTimeoutMs: undefined` is required during pairing-code flow.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.sock = (makeWASocket as any)({
         auth: state,
+        version,
         browser: ['Mac OS', 'Chrome', '14.4.1'],
         defaultQueryTimeoutMs: undefined,
       });
@@ -86,7 +93,9 @@ export class WhatsAppChannel implements Channel {
         const { connection, lastDisconnect, qr } = update;
 
         // qr arriving = unauthenticated. Use pairing code if we have a phone.
-        if (qr && this.linkedPhone && !pairingCodeRequested && !this.sock.authState.creds.registered) {
+        // Don't gate on authState.creds.registered — its shape varies and
+        // Baileys only emits qr events when not yet registered anyway.
+        if (qr && this.linkedPhone && !pairingCodeRequested) {
           pairingCodeRequested = true;
           try {
             const code: string = await this.sock.requestPairingCode(this.linkedPhone);
