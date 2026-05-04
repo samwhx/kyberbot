@@ -41,7 +41,39 @@ export interface TimelineEvent {
   classification?: 'public' | 'internal' | 'confidential' | 'pii';
   connection_id?: string;
   source_did?: string;
+  // ── Self-learning telemetry (Tier 1) ────────────────────────────────
+  // Populated by channel handlers; null for events that don't have a
+  // user/agent reply context (sleep cycles, file imports, etc.).
+  // Schema documented in docs/self-learning-plan.md §3.2.
+  metrics?: ReplyMetrics;
+  // Outcome annotation — set later by the outcome-annotator sleep step
+  // once a follow-up message arrives that classifies the reply.
+  outcome?: ReplyOutcome | null;
+  outcome_confidence?: number;
+  outcome_evidence?: string;
+  outcome_annotated_at?: string;
 }
+
+/**
+ * Per-reply metrics captured at channel-handler time.
+ * Fields are optional because not every channel/path can produce all of
+ * them (e.g. one-shot subprocess doesn't always parse stream-json so
+ * tools_used may be empty).
+ */
+export interface ReplyMetrics {
+  channel?: string;
+  latency_ms?: number;
+  model?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
+  tools_used?: string[];
+  reply_length_chars?: number;
+  received_at?: string;
+  replied_at?: string;
+}
+
+export type ReplyOutcome = 'thanks' | 'correction' | 'reask' | 'ignored' | 'neutral';
 
 export interface TimelineQuery {
   start?: string;
@@ -239,6 +271,32 @@ function runMigrations(database: Database.Database): void {
     database.exec(`ALTER TABLE timeline_events ADD COLUMN source_did TEXT`);
   }
 
+  // ── Self-learning telemetry + outcome annotations (Tier 1) ──────────
+  // metrics_json: per-reply telemetry (latency, tokens, tools used,
+  //   cost, model). Populated by store-conversation when the channel
+  //   handler supplies it. JSON shape is documented in
+  //   docs/self-learning-plan.md §3.2.
+  // outcome / outcome_confidence / outcome_evidence / outcome_annotated_at:
+  //   set by the outcome-annotator sleep step when a follow-up message
+  //   classifies the reply (thanks/correction/reask/ignored/neutral).
+  //   Used by the self-review heartbeat task to draft proposals.
+  if (!columnNames.has('metrics_json')) {
+    database.exec(`ALTER TABLE timeline_events ADD COLUMN metrics_json TEXT`);
+  }
+  if (!columnNames.has('outcome')) {
+    database.exec(`ALTER TABLE timeline_events ADD COLUMN outcome TEXT`);
+    database.exec(`CREATE INDEX IF NOT EXISTS idx_timeline_outcome ON timeline_events(outcome)`);
+  }
+  if (!columnNames.has('outcome_confidence')) {
+    database.exec(`ALTER TABLE timeline_events ADD COLUMN outcome_confidence REAL`);
+  }
+  if (!columnNames.has('outcome_evidence')) {
+    database.exec(`ALTER TABLE timeline_events ADD COLUMN outcome_evidence TEXT`);
+  }
+  if (!columnNames.has('outcome_annotated_at')) {
+    database.exec(`ALTER TABLE timeline_events ADD COLUMN outcome_annotated_at TEXT`);
+  }
+
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_timeline_tier ON timeline_events(tier);
     CREATE INDEX IF NOT EXISTS idx_timeline_priority ON timeline_events(priority DESC);
@@ -268,6 +326,8 @@ export async function addToTimeline(
   const topicsJson = JSON.stringify(event.topics || []);
   // ── ARP unification — pass-through agent-resource metadata ──────────
   const tagsJson = event.tags ? JSON.stringify(event.tags) : null;
+  // ── Self-learning telemetry (Tier 1) — channel-time metrics ─────────
+  const metricsJson = event.metrics ? JSON.stringify(event.metrics) : null;
 
   try {
     const result = database
@@ -275,8 +335,9 @@ export async function addToTimeline(
         `INSERT INTO timeline_events
            (type, timestamp, end_timestamp, title, summary, source_path,
             entities_json, topics_json,
-            project_id, tags_json, classification, connection_id, source_did)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            project_id, tags_json, classification, connection_id, source_did,
+            metrics_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(source_path) DO UPDATE SET
            type = excluded.type,
            timestamp = excluded.timestamp,
@@ -289,7 +350,8 @@ export async function addToTimeline(
            tags_json = COALESCE(excluded.tags_json, timeline_events.tags_json),
            classification = COALESCE(excluded.classification, timeline_events.classification),
            connection_id = COALESCE(excluded.connection_id, timeline_events.connection_id),
-           source_did = COALESCE(excluded.source_did, timeline_events.source_did)`
+           source_did = COALESCE(excluded.source_did, timeline_events.source_did),
+           metrics_json = COALESCE(excluded.metrics_json, timeline_events.metrics_json)`
       )
       .run(
         event.type,
@@ -304,7 +366,8 @@ export async function addToTimeline(
         tagsJson,
         event.classification ?? null,
         event.connection_id ?? null,
-        event.source_did ?? null
+        event.source_did ?? null,
+        metricsJson
       );
 
     logger.debug(`Added to timeline: ${event.title}`, {
@@ -333,6 +396,83 @@ export async function removeFromTimeline(
     .run(sourcePath);
 
   return result.changes > 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SELF-LEARNING — outcome annotation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Persist an outcome classification onto a timeline event. Called by the
+ * outcome-annotator sleep step once a follow-up message has been observed
+ * and classified. Idempotent — repeat calls overwrite (the latest signal
+ * is authoritative).
+ */
+export async function setTimelineOutcome(
+  root: string,
+  eventId: number,
+  outcome: ReplyOutcome | null,
+  confidence: number,
+  evidence: string,
+): Promise<void> {
+  const database = await ensureDatabase(root);
+  database
+    .prepare(
+      `UPDATE timeline_events
+         SET outcome = ?,
+             outcome_confidence = ?,
+             outcome_evidence = ?,
+             outcome_annotated_at = ?
+       WHERE id = ?`
+    )
+    .run(outcome, confidence, evidence.slice(0, 500), new Date().toISOString(), eventId);
+}
+
+/**
+ * Fetch events whose outcome has not yet been annotated. Used by the
+ * outcome-annotator sleep step to find the candidate set each cycle.
+ * Limited to events with metrics_json (i.e., actual reply turns) to
+ * avoid annotating file imports / sleep cycles.
+ */
+export async function getUnnannotatedReplies(
+  root: string,
+  limit = 200,
+): Promise<Array<TimelineEvent & { metrics: ReplyMetrics }>> {
+  const database = await ensureDatabase(root);
+  const rows = database
+    .prepare(
+      `SELECT * FROM timeline_events
+        WHERE metrics_json IS NOT NULL
+          AND outcome_annotated_at IS NULL
+        ORDER BY timestamp DESC
+        LIMIT ?`
+    )
+    .all(limit) as any[];
+  return rows.map(rowToEvent).filter(e => e.metrics) as Array<TimelineEvent & { metrics: ReplyMetrics }>;
+}
+
+function rowToEvent(row: any): TimelineEvent {
+  return {
+    id: row.id,
+    type: row.type,
+    timestamp: row.timestamp,
+    end_timestamp: row.end_timestamp ?? undefined,
+    title: row.title,
+    summary: row.summary ?? '',
+    source_path: row.source_path,
+    entities: row.entities_json ? JSON.parse(row.entities_json) : [],
+    topics: row.topics_json ? JSON.parse(row.topics_json) : [],
+    project_id: row.project_id ?? undefined,
+    tags: row.tags_json ? JSON.parse(row.tags_json) : undefined,
+    classification: row.classification ?? undefined,
+    connection_id: row.connection_id ?? undefined,
+    source_did: row.source_did ?? undefined,
+    metrics: row.metrics_json ? JSON.parse(row.metrics_json) : undefined,
+    outcome: row.outcome ?? null,
+    outcome_confidence: row.outcome_confidence ?? undefined,
+    outcome_evidence: row.outcome_evidence ?? undefined,
+    outcome_annotated_at: row.outcome_annotated_at ?? undefined,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -597,7 +737,8 @@ export async function addConversationToTimeline(
     classification?: 'public' | 'internal' | 'confidential' | 'pii';
     connection_id?: string;
     source_did?: string;
-  }
+  },
+  metrics?: ReplyMetrics,
 ): Promise<number> {
   return addToTimeline(root, {
     type: 'conversation',
@@ -609,6 +750,7 @@ export async function addConversationToTimeline(
     entities,
     topics,
     ...(arpMetadata ?? {}),
+    metrics,
   });
 }
 

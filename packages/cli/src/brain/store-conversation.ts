@@ -169,6 +169,12 @@ export interface ConversationInput {
   channel: string;
   timestamp?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Per-reply telemetry — populated by channel handlers when available.
+   * Stored on the timeline event's metrics_json column. Schema in
+   * docs/self-learning-plan.md §3.2.
+   */
+  metrics?: import('./timeline.js').ReplyMetrics;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -338,6 +344,7 @@ async function storeConversationImpl(
         timelineSummary,
         entityNames, topicNames,
         arpMetadataBundle,
+        input.metrics,
       );
     }
 

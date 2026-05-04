@@ -181,6 +181,9 @@ export class TelegramChannel implements Channel {
             systemPrompt = await buildChannelSystemPrompt('telegram', text);
           }
 
+          // Self-learning telemetry — capture timing around the Claude call.
+          const receivedAt = new Date().toISOString();
+          const claudeStart = Date.now();
           const reply = await client.complete(prompt, {
             system: systemPrompt,
             warmPoolKey,
@@ -193,6 +196,8 @@ export class TelegramChannel implements Channel {
             // Bash and Agent — so a prompt-injected message can't shell-exec.
             tools: 'broad',
           });
+          const latencyMs = Date.now() - claudeStart;
+          const repliedAt = new Date().toISOString();
 
           // Track both sides in history
           pushUserMessage(convoId, text);
@@ -220,14 +225,24 @@ export class TelegramChannel implements Channel {
           // does not block the reply path. See speak-on-reply.ts.
           maybeSpeakReply(reply, this.root);
 
-          // Fire-and-forget: store conversation in memory.
-          // (Previous `skipEmbeddings: true` was a no-op — the option was
-          // never read by storeConversation. Removed to stop lying.)
+          // Fire-and-forget: store conversation in memory + telemetry.
+          // metrics.{model, input_tokens, output_tokens, cost_usd, tools_used}
+          // are unavailable here — they live inside the claude subprocess
+          // result event which complete() doesn't currently surface. Day 1
+          // captures latency + reply length; tokens/cost arrive later when
+          // we plumb the result event. See docs/self-learning-plan.md §9.
           storeConversation(this.root, {
             prompt: text,
             response: reply,
             channel: 'telegram',
             metadata: { chatId, userId },
+            metrics: {
+              channel: 'telegram',
+              latency_ms: latencyMs,
+              reply_length_chars: reply.length,
+              received_at: receivedAt,
+              replied_at: repliedAt,
+            },
           }).catch((err) => logger.warn('Memory storage failed', { error: String(err) }));
         } catch (error) {
           logger.error('Failed to process Telegram message', { error: String(error) });

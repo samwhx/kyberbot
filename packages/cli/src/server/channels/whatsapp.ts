@@ -221,6 +221,8 @@ export class WhatsAppChannel implements Channel {
               systemPrompt = await buildChannelSystemPrompt('whatsapp', text);
             }
 
+            const receivedAt = new Date().toISOString();
+            const claudeStart = Date.now();
             const reply = await client.complete(prompt, {
               system: systemPrompt,
               warmPoolKey,
@@ -233,6 +235,8 @@ export class WhatsAppChannel implements Channel {
               // 'broad' blocks arbitrary Bash/Agent so injection can't RCE.
               tools: 'broad',
             });
+            const latencyMs = Date.now() - claudeStart;
+            const repliedAt = new Date().toISOString();
 
             // Track both sides in history
             pushUserMessage(convoId, text);
@@ -248,14 +252,21 @@ export class WhatsAppChannel implements Channel {
             // Voice mode hook: see speak-on-reply.ts for rationale.
             maybeSpeakReply(reply, this.root);
 
-            // Fire-and-forget: store conversation in memory.
-            // (Previous `skipEmbeddings: true` was a no-op — the option was
-            // never read by storeConversation. Removed to stop lying.)
+            // Fire-and-forget: store conversation + telemetry. See telegram.ts
+            // for the same shape — token/cost/tools fields are unavailable
+            // until claude.ts surfaces the result event (Tier 1 follow-up).
             storeConversation(this.root, {
               prompt: text,
               response: reply,
               channel: 'whatsapp',
               metadata: { remoteJid: msg.key.remoteJid, pushName: msg.pushName },
+              metrics: {
+                channel: 'whatsapp',
+                latency_ms: latencyMs,
+                reply_length_chars: reply.length,
+                received_at: receivedAt,
+                replied_at: repliedAt,
+              },
             }).catch((err) => logger.warn('Memory storage failed', { error: String(err) }));
           } catch (error) {
             logger.error('Failed to process WhatsApp message', { error: String(error) });
