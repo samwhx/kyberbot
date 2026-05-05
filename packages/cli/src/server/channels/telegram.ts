@@ -24,6 +24,7 @@ import { storeConversation } from '../../brain/store-conversation.js';
 import { buildChannelSystemPrompt, buildStaticChannelSystemPrompt, buildPerTurnContextBlock } from './system-prompt.js';
 import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, clearHistory, escapeForXml } from './conversation-history.js';
 import { isWarmPoolEnabled, getWarmPool } from '../../runtime/warm-claude-pool.js';
+import { tryRunProposalCommand, formatProposalCommandReply } from '../../services/proposal-commands.js';
 import { maybeSpeakReply } from '../../services/speak-on-reply.js';
 
 const logger = createLogger('telegram');
@@ -139,6 +140,21 @@ export class TelegramChannel implements Channel {
         const greeting = this.loadGreeting(agentName);
         await ctx.reply(greeting);
         return;
+      }
+
+      // ── Self-learning approval intercept (owner-only by construction —
+      //    we already verified chatId === ownerChatId above) ─────────────
+      // Returns null unless the text matches "approve <id>" / "reject <id>"
+      // AND at least one id matches a pending proposal. Prose like "please
+      // approve my plan" passes through to Claude unchanged.
+      try {
+        const proposalResult = await tryRunProposalCommand(this.root, text);
+        if (proposalResult) {
+          await ctx.reply(formatProposalCommandReply(proposalResult));
+          return;
+        }
+      } catch (err) {
+        logger.warn('Proposal command intercept failed; falling through to Claude', { error: String(err) });
       }
 
       // ── Route message ──────────────────────────────────────────────────

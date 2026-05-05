@@ -64,6 +64,7 @@ export class AgentRuntime {
   private startedAt = 0;
   private _status: 'running' | 'stopped' | 'error' = 'stopped';
   private embeddingsReady = false;
+  private selfReviewScheduler: ServiceHandle | null = null;
 
   constructor(config: AgentRuntimeConfig) {
     this.root = config.root;
@@ -179,6 +180,25 @@ export class AgentRuntime {
       } catch { /* system-prompt not available */ }
     }
 
+    // Self-learning Tier 2 scheduler — daily heartbeat that fires
+    // pattern detectors and notifies owner via channel. Off by default.
+    try {
+      const { startSelfReviewScheduler, isSelfLearningEnabled } =
+        await import('../services/self-review-scheduler.js');
+      if (isSelfLearningEnabled(this.identity)) {
+        this.selfReviewScheduler = startSelfReviewScheduler(this.root, {
+          channels: this.channels,
+          ownerTarget: {
+            telegram: this.identity.channels?.telegram?.owner_chat_id,
+            whatsapp: this.identity.channels?.whatsapp?.owner_jid,
+          },
+        });
+        logger.info(`Self-review scheduler enabled for ${this.name}`);
+      }
+    } catch (error) {
+      logger.warn(`Self-review init failed for ${this.name}`, { error: String(error) });
+    }
+
     this._status = 'running';
     logger.info(`Agent ${this.name} started`, {
       heartbeat: this.heartbeat ? 'running' : 'disabled',
@@ -205,6 +225,12 @@ export class AgentRuntime {
     if (this.heartbeat) {
       await this.heartbeat.stop();
       this.heartbeat = null;
+    }
+
+    // Stop self-review scheduler
+    if (this.selfReviewScheduler) {
+      await this.selfReviewScheduler.stop();
+      this.selfReviewScheduler = null;
     }
 
     // Stop channels

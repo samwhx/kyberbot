@@ -111,4 +111,13 @@ export interface IdentityConfig {
     enabled?: boolean;
     extensions?: string[];
   }>;
+  /**
+   * Self-learning Tier 2 — daily heartbeat that runs pattern detectors
+   * over the last 24h of telemetry, drafts proposals into
+   * brain/proposals/, pings owner via Telegram. Default OFF; opt in via
+   * `enabled: true` here OR `KYBERBOT_SELF_LEARNING=1` env var.
+   */
+  self_learning?: {
+    enabled?: boolean;
+  };
 }

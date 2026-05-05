@@ -28,6 +28,7 @@ import { storeConversation } from '../../brain/store-conversation.js';
 import { buildChannelSystemPrompt, buildStaticChannelSystemPrompt, buildPerTurnContextBlock } from './system-prompt.js';
 import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, escapeForXml } from './conversation-history.js';
 import { isWarmPoolEnabled } from '../../runtime/warm-claude-pool.js';
+import { tryRunProposalCommand, formatProposalCommandReply } from '../../services/proposal-commands.js';
 import { maybeSpeakReply } from '../../services/speak-on-reply.js';
 
 const logger = createLogger('channel');
@@ -184,6 +185,17 @@ export class WhatsAppChannel implements Channel {
           msg.message.extendedTextMessage?.text || '';
 
         if (!text) return;
+
+        // ── Self-learning approval intercept (owner-only — JID check above)
+        try {
+          const proposalResult = await tryRunProposalCommand(this.root, text);
+          if (proposalResult) {
+            await this.send(msg.key.remoteJid!, formatProposalCommandReply(proposalResult));
+            return;
+          }
+        } catch (err) {
+          logger.warn('Proposal command intercept failed; falling through to Claude', { error: String(err) });
+        }
 
         const message: ChannelMessage = {
           id: msg.key.id || '',
