@@ -85,6 +85,28 @@ export async function startServer(options: {
     }
   }
 
+  // Self-learning Tier 2 scheduler — daily heartbeat that fires pattern
+  // detectors and notifies owner via channel. Off by default; opt in via
+  // KYBERBOT_SELF_LEARNING=1 env or self_learning.enabled in identity.yaml.
+  let selfReviewScheduler: ServiceHandle | null = null;
+  try {
+    const identity = getIdentity();
+    const { startSelfReviewScheduler, isSelfLearningEnabled } =
+      await import('../services/self-review-scheduler.js');
+    if (isSelfLearningEnabled(identity)) {
+      selfReviewScheduler = startSelfReviewScheduler(root, {
+        channels,
+        ownerTarget: {
+          telegram: identity.channels?.telegram?.owner_chat_id,
+          whatsapp: identity.channels?.whatsapp?.owner_jid,
+        },
+      });
+      logger.info('Self-review scheduler enabled');
+    }
+  } catch (error) {
+    logger.warn('Self-review init failed', { error: String(error) });
+  }
+
   // Error middleware — must be after all routes
   app.use(errorMiddleware);
 
@@ -129,6 +151,12 @@ export async function startServer(options: {
 
       resolve({
         stop: async () => {
+          // Stop self-review scheduler (releases interval timer)
+          if (selfReviewScheduler) {
+            try { await selfReviewScheduler.stop(); } catch { /* best-effort */ }
+            selfReviewScheduler = null;
+          }
+
           // Stop channels
           for (const channel of channels) {
             try {
