@@ -25,6 +25,7 @@ import { runConsolidateStep, ConsolidateResult } from './steps/consolidate.js';
 import { runObserveStep, ObserveResult } from './steps/observe.js';
 import { runProfileStep, ProfileResult } from './steps/profile.js';
 import { runReasoningStep, ReasoningResult } from './steps/reasoning.js';
+import { runOutcomeAnnotatorStep, OutcomeAnnotatorResult } from './steps/outcome-annotator.js';
 import { saveCheckpoint } from './utils/checkpoint.js';
 
 const logger = createLogger('sleep-agent');
@@ -40,6 +41,7 @@ export interface RunMetrics {
   reasoning?: ReasoningResult & { durationMs: number };
   profile?: ProfileResult & { durationMs: number };
   entityHygiene?: EntityHygieneResult & { durationMs: number };
+  outcomeAnnotator?: OutcomeAnnotatorResult & { durationMs: number };
   totalDurationMs: number;
 }
 
@@ -170,6 +172,22 @@ export async function startSleepAgent(
       metrics.entityHygiene = { ...hygieneResult, durationMs: Date.now() - hygieneStart };
       recordTelemetry(db, runId, 'entity-hygiene', metrics.entityHygiene);
       logger.info('Entity hygiene step completed', { runId, heapMB: memMB(), ...metrics.entityHygiene });
+
+      // Step 7: Outcome Annotator (Tier 1 of self-learning)
+      // Classify each unannotated reply with thanks/correction/reask/ignored/neutral
+      // based on the next user message. Heuristic-only, no LLM. Cheap.
+      saveCheckpoint(db, runId, 'outcome-annotator');
+      const annotatorStart = Date.now();
+      const annotatorResult = await runOutcomeAnnotatorStep(root, cfg);
+      metrics.outcomeAnnotator = { ...annotatorResult, durationMs: Date.now() - annotatorStart };
+      // recordTelemetry expects {count,processed,...} — map our result shape.
+      recordTelemetry(db, runId, 'outcome-annotator', {
+        count: annotatorResult.annotated,
+        processed: annotatorResult.scanned,
+        durationMs: metrics.outcomeAnnotator.durationMs,
+        errors: annotatorResult.errors,
+      });
+      logger.info('Outcome annotator completed', { runId, heapMB: memMB(), ...metrics.outcomeAnnotator });
 
       // Complete run
       const totalDuration = Date.now() - startTime;
