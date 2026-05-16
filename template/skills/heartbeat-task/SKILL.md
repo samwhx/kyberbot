@@ -49,12 +49,12 @@ If anything is ambiguous, ask the user before proceeding.
 Ask the user: **"Where do you want to receive the results?"**
 
 Options to present:
-- **Telegram** — send results as a Telegram message (if Telegram is configured in identity.yaml)
+- **Push notification** — send via `kyberbot notify "..."`, which routes through the channel configured in `identity.yaml` (`notification_channel`, default `whatsapp`) and automatically falls back to the other channel if the primary is disconnected. This is the default for anything user-facing.
 - **Brain only** — store in memory, viewable via `kyberbot recall` / `kyberbot timeline` (silent, no notification)
 - **Brain file** — write results to a file in `brain/` for later review
 - **Other** — the user may want Slack, email, Notion, etc. — this may require creating an integration
 
-Read identity.yaml to check which channels are configured before presenting options. Don't offer Telegram if it's not set up.
+Read identity.yaml to check which channels are configured before offering push notifications. If neither WhatsApp nor Telegram is set up, don't offer the push option — guide the user to add a channel first (`kyberbot channel add whatsapp` or `kyberbot channel add telegram`).
 
 ### 3. Resolve Credentials & Dependencies
 
@@ -76,7 +76,7 @@ If the task involves more than a single simple command (API calls, parsing outpu
 2. Include the full step-by-step execution instructions
 3. Include the notification delivery method chosen in step 2
 4. Reference env vars by name (e.g., `$POSTHOG_API_KEY`), never hardcode secrets
-5. If Telegram delivery was chosen, include the curl command to send the message using the bot token and chat ID from identity.yaml
+5. For push delivery, use `kyberbot notify "<message>"` — never hardcode bot tokens, chat IDs, or JIDs in skill files. The notify command resolves the destination from `identity.yaml` at execution time, so the user can switch channels by editing one config field.
 
 ### 5. Register the Heartbeat Task
 
@@ -129,11 +129,11 @@ The **Skill** field is optional. When present, the heartbeat service automatical
 **Action**: Read the current todo list and surface any items that are overdue or due soon. Remind the user of top priorities.
 ```
 
-**Complex task with skill and Telegram delivery:**
+**Complex task with skill and push delivery:**
 ```markdown
 ### PostHog Signup Check
 **Schedule**: every 30m
-**Action**: Check for new signups and notify via Telegram if any found.
+**Action**: Check for new signups and notify via `kyberbot notify` if any found.
 **Skill**: posthog-signups
 ```
 
@@ -150,4 +150,4 @@ The **Skill** field is optional. When present, the heartbeat service automatical
 - Tasks should be written as instructions the agent can execute autonomously, without user input.
 - Keep actions specific. "Check email" is vague. "Run `command` and summarize new items" is actionable.
 - The heartbeat respects active hours configured in identity.yaml — tasks won't run outside those hours regardless of their schedule.
-- For Telegram delivery: read the bot token and owner_chat_id from identity.yaml at execution time. Never hardcode them in skill files.
+- For push delivery: always go through `kyberbot notify "<message>"` (optionally `--channel telegram|whatsapp` to override). The command reads `notification_channel` from identity.yaml, resolves the right target, and handles channel fallback. Never write Telegram curl calls or Baileys send calls directly in skill files.

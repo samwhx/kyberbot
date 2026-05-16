@@ -17,7 +17,7 @@ import { input } from '@inquirer/prompts';
 import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import yaml from 'js-yaml';
-import { getRoot, getIdentity } from '../config.js';
+import { getRoot, getIdentity, getServerPort } from '../config.js';
 import { IdentityConfig } from '../types.js';
 
 type ChannelType = 'telegram' | 'whatsapp';
@@ -315,6 +315,56 @@ export function createChannelCommand(): Command {
       } catch (error) {
         console.error(chalk.red(`Error: ${error}`));
         console.log(chalk.dim('  Run `kyberbot onboard` first to create identity.yaml.\n'));
+      }
+    });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // kyberbot channel send <type> <message>
+  // ─────────────────────────────────────────────────────────────────────────
+
+  cmd
+    .command('send <type> <message>')
+    .description('Send an outbound message via a connected channel')
+    .option('--jid <jid>', 'Destination JID (WhatsApp only; defaults to owner_jid from identity.yaml)')
+    .action(async (type: string, message: string, opts: { jid?: string }) => {
+      if (type !== 'telegram' && type !== 'whatsapp') {
+        console.error(chalk.red(`\nUnknown channel type: ${type}`));
+        console.log(chalk.dim('  Supported: telegram, whatsapp\n'));
+        process.exit(1);
+      }
+
+      try {
+        let port: number;
+        try {
+          port = getServerPort();
+        } catch {
+          port = 3456;
+        }
+
+        const token = process.env.KYBERBOT_API_TOKEN || '';
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+
+        const body: Record<string, string> = { type, message };
+        if (opts.jid) body.jid = opts.jid;
+
+        const res = await fetch(`http://localhost:${port}/api/web/manage/channels/send`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(5000),
+        });
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({ error: res.statusText })) as Record<string, string>;
+          console.error(chalk.red(`\nSend failed: ${data.error || res.statusText}\n`));
+          process.exit(1);
+        }
+
+        console.log(chalk.green(`\nMessage sent via ${type}.\n`));
+      } catch (error) {
+        console.error(chalk.red(`\nError: ${error}\n`));
+        process.exit(1);
       }
     });
 

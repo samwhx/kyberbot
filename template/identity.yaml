@@ -34,6 +34,12 @@ claude:
 #   whatsapp:
 #     enabled: true
 
+# Default delivery channel for `kyberbot notify` (heartbeat briefings, alerts,
+# self-review pings). Skills should use `kyberbot notify "..."` rather than
+# calling Telegram or WhatsApp directly. Falls back to the other channel if
+# the preferred one is disconnected. Valid values: whatsapp | telegram.
+# notification_channel: whatsapp
+
 # GitHub backup (optional)
 # backup:
 #   enabled: true

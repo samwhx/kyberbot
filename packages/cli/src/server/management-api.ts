@@ -445,6 +445,108 @@ export function createManagementRouter(channels: Channel[], root: string): Route
     }
   });
 
+  // POST /channels/send — Send an outbound message via a connected channel
+  // Body: { type: 'whatsapp' | 'telegram', message: string, jid?: string }
+  // For WhatsApp, jid defaults to identity.yaml owner_jid.
+  router.post('/channels/send', asyncHandler(async (req, res) => {
+    const { type = 'whatsapp', message, jid } = req.body ?? {};
+    if (!message || typeof message !== 'string') {
+      res.status(400).json({ error: 'message is required' });
+      return;
+    }
+
+    const channel = channels.find(c => c.name === type);
+    if (!channel) {
+      res.status(404).json({ error: `Channel not found: ${type}` });
+      return;
+    }
+    if (!channel.isConnected()) {
+      res.status(503).json({ error: `Channel not connected: ${type}` });
+      return;
+    }
+
+    // Resolve destination — use explicit jid or fall back to owner_jid
+    let targetJid: string | undefined = jid;
+    if (!targetJid && type === 'whatsapp') {
+      const identity = yaml.load(readFileSync(join(root, 'identity.yaml'), 'utf-8')) as Record<string, any>;
+      targetJid = identity.channels?.whatsapp?.owner_jid;
+    }
+    if (!targetJid) {
+      res.status(400).json({ error: 'jid is required (or set owner_jid in identity.yaml for whatsapp)' });
+      return;
+    }
+
+    await (channel as any).send(targetJid, message);
+    logger.info('Outbound channel send', { type, jid: targetJid });
+    res.json({ ok: true, type, jid: targetJid });
+  }));
+
+  // POST /notify — Send a message via the configured notification_channel
+  // Body: { message: string, channel?: 'whatsapp' | 'telegram' }
+  //
+  // Reads `notification_channel` from identity.yaml (default: 'whatsapp').
+  // Resolves target from identity.yaml (owner_jid for whatsapp, owner_chat_id
+  // for telegram). If the preferred channel is disconnected, falls back to
+  // the other configured channel so heartbeat notes don't silently vanish.
+  router.post('/notify', asyncHandler(async (req, res) => {
+    const { message, channel: requested } = req.body ?? {};
+    if (!message || typeof message !== 'string') {
+      res.status(400).json({ error: 'message is required' });
+      return;
+    }
+
+    const identity = yaml.load(readFileSync(join(root, 'identity.yaml'), 'utf-8')) as Record<string, any>;
+    const preferred: 'whatsapp' | 'telegram' =
+      requested ?? identity.notification_channel ?? 'whatsapp';
+
+    const resolveTarget = (type: 'whatsapp' | 'telegram'): string | undefined => {
+      if (type === 'whatsapp') return identity.channels?.whatsapp?.owner_jid;
+      const chatId = identity.channels?.telegram?.owner_chat_id;
+      return chatId !== undefined ? String(chatId) : undefined;
+    };
+
+    const trySend = async (type: 'whatsapp' | 'telegram'): Promise<{ ok: true; type: string; target: string } | { ok: false; reason: string }> => {
+      const target = resolveTarget(type);
+      if (!target) return { ok: false, reason: `no target configured for ${type}` };
+      const ch = channels.find(c => c.name === type);
+      if (!ch) return { ok: false, reason: `${type} channel not loaded` };
+      if (!ch.isConnected()) return { ok: false, reason: `${type} not connected` };
+      await (ch as any).send(target, message);
+      return { ok: true, type, target };
+    };
+
+    const primary = await trySend(preferred);
+    if (primary.ok) {
+      logger.info('Notify sent', { channel: primary.type, target: primary.target });
+      res.json(primary);
+      return;
+    }
+
+    const fallback: 'whatsapp' | 'telegram' = preferred === 'whatsapp' ? 'telegram' : 'whatsapp';
+    const secondary = await trySend(fallback);
+    if (secondary.ok) {
+      logger.warn('Notify primary failed, used fallback', {
+        preferred,
+        primaryReason: primary.reason,
+        fallback: secondary.type,
+      });
+      res.json({ ...secondary, fallback: true, primaryReason: primary.reason });
+      return;
+    }
+
+    logger.error('Notify failed on all channels', {
+      preferred,
+      primaryReason: primary.reason,
+      fallbackReason: secondary.reason,
+    });
+    res.status(503).json({
+      error: 'No usable notification channel',
+      preferred,
+      primaryReason: primary.reason,
+      fallbackReason: secondary.reason,
+    });
+  }));
+
   // POST /channels/:type — Add/configure a channel
   router.post('/channels/:type', (req, res) => {
     const type = req.params.type as string;
