@@ -22,7 +22,7 @@ import { getAgentNameForRoot } from '../../config.js';
 import { Channel, ChannelMessage } from './types.js';
 import { storeConversation } from '../../brain/store-conversation.js';
 import { buildChannelSystemPrompt, buildStaticChannelSystemPrompt, buildPerTurnContextBlock } from './system-prompt.js';
-import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, clearHistory, escapeForXml } from './conversation-history.js';
+import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, buildHistoryBlock, clearHistory, escapeForXml } from './conversation-history.js';
 import { isWarmPoolEnabled, getWarmPool } from '../../runtime/warm-claude-pool.js';
 import { tryRunProposalCommand, formatProposalCommandReply } from '../../services/proposal-commands.js';
 import { maybeSpeakReply } from '../../services/speak-on-reply.js';
@@ -75,6 +75,27 @@ export class TelegramChannel implements Channel {
       const chatId = ctx.chat.id;
       const userId = ctx.from?.id;
       const text = ctx.message.text;
+
+      // Telegram reply ("quote") metadata — when the user taps Reply on an
+      // earlier message, the quoted content lives in reply_to_message.
+      // We extract its text or caption so the agent sees what's being
+      // referenced; non-text replies become a `[media-type]` marker.
+      const replyTo = (ctx.message as any).reply_to_message;
+      const quotedRaw = replyTo
+        ? (replyTo.text
+          || replyTo.caption
+          || (replyTo.photo ? '[photo]' : null)
+          || (replyTo.voice ? '[voice note]' : null)
+          || (replyTo.audio ? '[audio]' : null)
+          || (replyTo.video ? '[video]' : null)
+          || (replyTo.document ? `[document${replyTo.document.file_name ? `: ${replyTo.document.file_name}` : ''}]` : null)
+          || (replyTo.sticker ? '[sticker]' : null)
+          || (replyTo.location ? '[location]' : null)
+          || (replyTo.contact ? '[contact]' : null))
+        : null;
+      const quotedBlock = quotedRaw
+        ? `<quoted_message>${escapeForXml(quotedRaw)}</quoted_message>\n`
+        : '';
 
       // ── Verification mode ──────────────────────────────────────────────
       if (this.verificationCode) {
@@ -189,11 +210,19 @@ export class TelegramChannel implements Channel {
           if (useWarmPool) {
             const ctxBlock = await buildPerTurnContextBlock('telegram', text);
             const ctx = ctxBlock.trim() ? `<context>\n${ctxBlock}\n</context>\n\n` : '';
-            prompt = `${ctx}<user_message>${escapeForXml(text)}</user_message>`;
+            // Warm sessions recycle (4h / 50 turns / on error / on restart),
+            // so we cannot assume the subprocess remembers earlier turns.
+            // Always re-inject the rolling history.
+            const historyBlock = buildHistoryBlock(convoId);
+            const history = historyBlock ? `${historyBlock}\n\n` : '';
+            prompt = `${ctx}${history}${quotedBlock}<user_message>${escapeForXml(text)}</user_message>`;
             warmPoolKey = convoId;
             buildSystemPrompt = () => buildStaticChannelSystemPrompt('telegram');
           } else {
-            prompt = buildPromptWithHistory(convoId, text);
+            const base = buildPromptWithHistory(convoId, text);
+            prompt = quotedBlock
+              ? base.replace(/<user_message>/, `${quotedBlock}<user_message>`)
+              : base;
             systemPrompt = await buildChannelSystemPrompt('telegram', text);
           }
 

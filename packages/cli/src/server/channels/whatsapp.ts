@@ -26,12 +26,39 @@ import { Channel, ChannelMessage } from './types.js';
 import { join } from 'path';
 import { storeConversation } from '../../brain/store-conversation.js';
 import { buildChannelSystemPrompt, buildStaticChannelSystemPrompt, buildPerTurnContextBlock } from './system-prompt.js';
-import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, escapeForXml } from './conversation-history.js';
+import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, buildHistoryBlock, escapeForXml } from './conversation-history.js';
 import { isWarmPoolEnabled } from '../../runtime/warm-claude-pool.js';
 import { tryRunProposalCommand, formatProposalCommandReply } from '../../services/proposal-commands.js';
 import { maybeSpeakReply } from '../../services/speak-on-reply.js';
 
 const logger = createLogger('channel');
+
+/**
+ * Extract a human-readable representation of the message a WhatsApp reply is
+ * quoting. Returns null when there's no quoted message. For non-text quoted
+ * content (images, voice notes, etc.) we emit a `[media-type]` marker plus
+ * any caption — enough for the agent to understand what's being referenced.
+ *
+ * Shape comes from Baileys: `extendedTextMessage.contextInfo.quotedMessage`.
+ */
+function extractQuotedText(contextInfo: any): string | null {
+  const q = contextInfo?.quotedMessage;
+  if (!q) return null;
+  if (typeof q.conversation === 'string' && q.conversation.length > 0) return q.conversation;
+  if (q.extendedTextMessage?.text) return q.extendedTextMessage.text;
+  if (q.imageMessage) return q.imageMessage.caption ? `[image] ${q.imageMessage.caption}` : '[image]';
+  if (q.videoMessage) return q.videoMessage.caption ? `[video] ${q.videoMessage.caption}` : '[video]';
+  if (q.audioMessage) return '[voice note]';
+  if (q.documentMessage) {
+    const name = q.documentMessage.fileName ? `: ${q.documentMessage.fileName}` : '';
+    const cap = q.documentMessage.caption ? ` — ${q.documentMessage.caption}` : '';
+    return `[document${name}]${cap}`;
+  }
+  if (q.stickerMessage) return '[sticker]';
+  if (q.locationMessage) return '[location]';
+  if (q.contactMessage) return '[contact]';
+  return null;
+}
 
 export class WhatsAppChannel implements Channel {
   readonly name = 'whatsapp';
@@ -186,6 +213,14 @@ export class WhatsAppChannel implements Channel {
 
         if (!text) return;
 
+        // WhatsApp reply ("quote") metadata — when present, the user is
+        // explicitly tying this turn to an earlier message. Inject it into
+        // the prompt so the agent doesn't have to guess.
+        const quotedText = extractQuotedText(msg.message.extendedTextMessage?.contextInfo);
+        const quotedBlock = quotedText
+          ? `<quoted_message>${escapeForXml(quotedText)}</quoted_message>\n`
+          : '';
+
         // ── Self-learning approval intercept (owner-only — JID check above)
         try {
           const proposalResult = await tryRunProposalCommand(this.root, text);
@@ -225,11 +260,22 @@ export class WhatsAppChannel implements Channel {
             if (useWarmPool) {
               const ctxBlock = await buildPerTurnContextBlock('whatsapp', text);
               const ctx = ctxBlock.trim() ? `<context>\n${ctxBlock}\n</context>\n\n` : '';
-              prompt = `${ctx}<user_message>${escapeForXml(text)}</user_message>`;
+              // Warm sessions recycle every 4h / 50 turns / on error / on
+              // restart (see warm-claude-pool MAX_AGE_MS), so we cannot
+              // rely on the subprocess to remember earlier turns. Always
+              // re-inject the rolling history.
+              const historyBlock = buildHistoryBlock(convoId);
+              const history = historyBlock ? `${historyBlock}\n\n` : '';
+              prompt = `${ctx}${history}${quotedBlock}<user_message>${escapeForXml(text)}</user_message>`;
               warmPoolKey = convoId;
               buildSystemPrompt = () => buildStaticChannelSystemPrompt('whatsapp');
             } else {
-              prompt = buildPromptWithHistory(convoId, text);
+              // Non-warm path already prepends history via buildPromptWithHistory;
+              // splice the quoted block in just before the current user message.
+              const base = buildPromptWithHistory(convoId, text);
+              prompt = quotedBlock
+                ? base.replace(/<user_message>/, `${quotedBlock}<user_message>`)
+                : base;
               systemPrompt = await buildChannelSystemPrompt('whatsapp', text);
             }
 

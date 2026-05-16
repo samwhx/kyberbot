@@ -45,6 +45,33 @@ export function pushAssistantMessage(conversationId: string, content: string): v
 }
 
 /**
+ * Render just the <conversation_history>...</conversation_history> block for
+ * a conversation — empty string if nothing recent. Callers compose this with
+ * other prompt sections (per-turn context, quoted messages, user message)
+ * when they need finer control than `buildPromptWithHistory` gives.
+ *
+ * The block has no trailing newline; callers add separators as needed.
+ */
+export function buildHistoryBlock(conversationId: string): string {
+  const history = getOrCreateHistory(conversationId);
+  const cutoff = Date.now() - MAX_AGE_MS;
+  const recent = history.filter(e => e.timestamp >= cutoff);
+  if (recent.length === 0) return '';
+
+  const lines: string[] = ['<conversation_history>'];
+  for (const entry of recent) {
+    const tag = entry.role === 'user' ? 'user_message' : 'assistant_message';
+    // Truncate long assistant responses in history to save context
+    const content = entry.role === 'assistant' && entry.content.length > 500
+      ? entry.content.slice(0, 497) + '...'
+      : entry.content;
+    lines.push(`<${tag}>${escapeForXml(content)}</${tag}>`);
+  }
+  lines.push('</conversation_history>');
+  return lines.join('\n');
+}
+
+/**
  * Build a prompt that includes conversation history before the current message.
  * Returns the full prompt string to pass to the Agent SDK.
  *
@@ -54,28 +81,13 @@ export function pushAssistantMessage(conversationId: string, content: string): v
  * injection from messaging channels. (See server/channels/system-prompt.ts.)
  */
 export function buildPromptWithHistory(conversationId: string, currentMessage: string): string {
-  const history = getOrCreateHistory(conversationId);
-
-  // Filter out stale entries
-  const cutoff = Date.now() - MAX_AGE_MS;
-  const recent = history.filter(e => e.timestamp >= cutoff);
-
+  const historyBlock = buildHistoryBlock(conversationId);
   const lines: string[] = [];
-  if (recent.length > 0) {
-    lines.push('<conversation_history>');
-    for (const entry of recent) {
-      const tag = entry.role === 'user' ? 'user_message' : 'assistant_message';
-      // Truncate long assistant responses in history to save context
-      const content = entry.role === 'assistant' && entry.content.length > 500
-        ? entry.content.slice(0, 497) + '...'
-        : entry.content;
-      lines.push(`<${tag}>${escapeForXml(content)}</${tag}>`);
-    }
-    lines.push('</conversation_history>');
+  if (historyBlock) {
+    lines.push(historyBlock);
     lines.push('');
   }
   lines.push(`<user_message>${escapeForXml(currentMessage)}</user_message>`);
-
   return lines.join('\n');
 }
 
