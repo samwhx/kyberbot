@@ -37,11 +37,12 @@ function parseIntervalMs(intervalStr: string): number {
 }
 
 /**
- * Pull the `### Task Name` + `**Schedule**: ...` pairs out of HEARTBEAT.md.
- * Only tasks in the `## Tasks` section are returned. Schedule is kept as
- * a raw string; `isTaskDue` does the interpretation.
+ * Pull the `### Task Name` + `**Schedule**: ...` (+ optional `**Window**: ...`)
+ * triples out of HEARTBEAT.md. Only tasks in the `## Tasks` section are
+ * returned. Schedule and window are kept as raw strings; `isTaskDue` does
+ * the interpretation.
  */
-interface ParsedTask { name: string; schedule: string }
+interface ParsedTask { name: string; schedule: string; window?: string }
 function parseHeartbeatTasks(content: string): ParsedTask[] {
   const tasks: ParsedTask[] = [];
   const afterTasks = content.split(/^##\s+Tasks\b/im)[1];
@@ -50,26 +51,88 @@ function parseHeartbeatTasks(content: string): ParsedTask[] {
   for (const block of blocks) {
     const nameMatch = block.match(/^([^\n]+)/);
     const scheduleMatch = block.match(/\*\*Schedule\*\*:\s*([^\n]+)/i);
+    const windowMatch = block.match(/\*\*Window\*\*:\s*([^\n]+)/i);
     if (nameMatch && scheduleMatch) {
-      tasks.push({ name: nameMatch[1].trim(), schedule: scheduleMatch[1].trim() });
+      tasks.push({
+        name: nameMatch[1].trim(),
+        schedule: scheduleMatch[1].trim(),
+        ...(windowMatch ? { window: windowMatch[1].trim() } : {}),
+      });
     }
   }
   return tasks;
 }
 
+/** Minutes-of-day (0..1439) for `d` rendered in `tz`. */
+function minutesOfDayInTz(d: Date, tz: string): number {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const [hStr, mStr] = fmt.format(d).split(':');
+  const h = Number(hStr) % 24; // some locales emit "24" for midnight
+  return h * 60 + Number(mStr);
+}
+
+/** "YYYY-MM-DD" calendar date for `d` in `tz` — for cross-day equality. */
+function localDateString(d: Date, tz: string): string {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+  return fmt.format(d);
+}
+
+/** Parse "HH:MM-HH:MM" into [startMin, endMin]; null if malformed. */
+function parseWindow(window: string): [number, number] | null {
+  const m = window.match(/^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/);
+  if (!m) return null;
+  return [Number(m[1]) * 60 + Number(m[2]), Number(m[3]) * 60 + Number(m[4])];
+}
+
 /**
- * Decide whether a parsed task is due given its last-check timestamp.
- * Handles the common schedule phrasings used in HEARTBEAT.md templates:
- * `every Nm|Nh|Nd`, `daily`, `weekly`, `monthly`. Unknown syntax is
- * treated as "may be due" — conservative so we don't silently suppress
- * real work.
+ * Pull the time-of-day out of `daily 9pm`, `daily 12pm`, `daily 21:00`.
+ * Returns minutes-of-day, or null when no explicit time is given (plain `daily`).
  */
-function isTaskDue(task: ParsedTask, lastCheckIso: string | undefined, now: Date): boolean {
-  if (!lastCheckIso) return true; // Never run — run now
-  const lastCheck = new Date(lastCheckIso);
-  if (isNaN(lastCheck.getTime())) return true;
-  const elapsedMs = now.getTime() - lastCheck.getTime();
+function parseDailyTimeOfDay(schedule: string): number | null {
+  const meridiem = schedule.match(/daily\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+  if (meridiem) {
+    let h = Number(meridiem[1]);
+    const m = meridiem[2] ? Number(meridiem[2]) : 0;
+    const pm = meridiem[3].toLowerCase() === 'pm';
+    if (h === 12) h = pm ? 12 : 0;
+    else if (pm) h += 12;
+    return h * 60 + m;
+  }
+  const military = schedule.match(/daily\s+(\d{1,2}):(\d{2})\b/i);
+  if (military) return Number(military[1]) * 60 + Number(military[2]);
+  return null;
+}
+
+/**
+ * Decide whether a parsed task is due given its last-check timestamp and
+ * the agent's timezone. A task is due when *all* applicable constraints
+ * hold:
+ *   - cadence elapsed (every Nm/h/d, daily, weekly, monthly)
+ *   - for `daily HHam/pm`: today's scheduled time has passed AND the task
+ *     hasn't already run today after that time
+ *   - if `**Window**: HH:MM-HH:MM` declared, current local time inside it
+ *
+ * Unknown schedule syntax is treated as "may be due" — conservative so we
+ * don't silently suppress real work.
+ */
+function isTaskDue(task: ParsedTask, lastCheckIso: string | undefined, now: Date, tz: string): boolean {
+  // Window gate — applies regardless of schedule type.
+  if (task.window) {
+    const w = parseWindow(task.window);
+    if (w) {
+      const nowMin = minutesOfDayInTz(now, tz);
+      if (nowMin < w[0] || nowMin > w[1]) return false;
+    }
+  }
+
   const schedule = task.schedule.toLowerCase();
+  const lastCheck = lastCheckIso ? new Date(lastCheckIso) : null;
+  const lastValid = lastCheck && !isNaN(lastCheck.getTime()) ? lastCheck : null;
+  const elapsedMs = lastValid ? now.getTime() - lastValid.getTime() : Infinity;
 
   const everyMatch = schedule.match(/every\s+(\d+)\s*(m|h|d)\b/);
   if (everyMatch) {
@@ -79,7 +142,26 @@ function isTaskDue(task: ParsedTask, lastCheckIso: string | undefined, now: Date
     return elapsedMs >= required;
   }
 
-  if (schedule.startsWith('daily')) return elapsedMs >= 24 * 3_600_000;
+  if (schedule.startsWith('daily')) {
+    // Once-per-local-day cap — protects against the task re-firing on
+    // every subsequent in-window tick. The picker prompt also enforces
+    // this, but isTaskDue is the cheaper gate.
+    if (lastValid && localDateString(lastValid, tz) === localDateString(now, tz)) {
+      return false;
+    }
+    // Hasn't run today. When is it eligible to fire?
+    //   - If a window is declared, we already passed the window check above;
+    //     anywhere inside the window is fair game (the scheduled time is the
+    //     target, the window is the slack).
+    //   - If no window, the scheduled time-of-day is the lower bound.
+    if (task.window) return true;
+    const scheduledMin = parseDailyTimeOfDay(schedule);
+    if (scheduledMin !== null) {
+      return minutesOfDayInTz(now, tz) >= scheduledMin;
+    }
+    return elapsedMs >= 24 * 3_600_000;
+  }
+
   if (schedule.startsWith('weekly')) return elapsedMs >= 7 * 24 * 3_600_000;
   if (schedule.startsWith('monthly')) return elapsedMs >= 28 * 24 * 3_600_000;
 
@@ -200,7 +282,8 @@ async function tick(root: string): Promise<void> {
       ? JSON.parse(readFileSync(stateFileEarly, 'utf-8'))
       : { lastChecks: {} };
     const tasks = parseHeartbeatTasks(content);
-    if (tasks.length > 0 && !tasks.some((t) => isTaskDue(t, stateEarly.lastChecks?.[t.name], new Date()))) {
+    const tz = getIdentityForRoot(root).timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tasks.length > 0 && !tasks.some((t) => isTaskDue(t, stateEarly.lastChecks?.[t.name], new Date(), tz))) {
       logger.debug(`Heartbeat skipped — no task due yet (${tasks.length} scheduled)`);
       return;
     }
@@ -239,7 +322,10 @@ async function tick(root: string): Promise<void> {
       'You are executing a heartbeat task. Follow these instructions exactly:',
       '',
       '1. Read the HEARTBEAT.md tasks below and the heartbeat-state.json timestamps.',
-      '2. Determine which task is most overdue based on its Schedule and last run time.',
+      '2. Pick exactly one task to run this tick, in this priority order:',
+      '   a. Tasks with a **Window** field whose current local time falls inside that window AND that have not yet run today after their scheduled time — these are time-anchored and their slot is perishable. Pick the one that is closest to falling out of its window.',
+      '   b. Otherwise, the most-overdue interval task (every Nm/h/d) whose cadence has elapsed.',
+      '   c. Never let a high-cadence interval task (e.g. every 30m) starve a daily/window-bound task that is currently inside its window — the windowed task wins.',
       '3. If a task has a **Skill** reference, the full skill instructions are included below — follow them step by step.',
       '4. If a task has no **Skill** reference, execute the **Action** directly.',
       '5. After completing the task, update heartbeat-state.json with the current time.',
