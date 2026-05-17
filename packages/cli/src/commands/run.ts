@@ -171,6 +171,17 @@ export function createRunCommand(): Command {
           createLogger('warm-pool').warn('init failed; falling back to one-shot subprocess', { error: String(err) });
         }
 
+        // Pre-warm transcribe binary detection so the first voice note
+        // after restart doesn't pay the ~10s whisper-cli `--help` probe
+        // inline with the user's reply. Best-effort: failures defer
+        // the cost to first use. Runs async — boot continues.
+        void (async () => {
+          try {
+            const { prewarmTranscribeDetection } = await import('../services/transcribe.js');
+            await prewarmTranscribeDetection();
+          } catch { /* non-fatal */ }
+        })();
+
         // ─────────────────────────────────────────────────────────────
         // Service 1: ChromaDB check
         // ─────────────────────────────────────────────────────────────

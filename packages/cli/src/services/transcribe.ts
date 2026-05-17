@@ -51,24 +51,47 @@ const KNOWN_BINARIES: Array<{ bin: string; flavour: WhisperFlavour }> = [
   { bin: '/usr/local/bin/whisper', flavour: 'python' },
 ];
 
+// Detection is expensive — whisper-cli's `--help` initialises Metal/BLAS
+// backends before printing, regularly taking 6-10s on Apple Silicon.
+// Cache the result for the lifetime of the process so we only pay the
+// slow probe once. Reset via resetTranscribeCache() (for tests).
+let _detectedCache: DetectedWhisper | null | undefined = undefined;
+
+export function resetTranscribeCache(): void {
+  _detectedCache = undefined;
+}
+
 async function detectWhisper(override?: string): Promise<DetectedWhisper | null> {
+  if (_detectedCache !== undefined && !override) return _detectedCache;
+
   if (override) {
     const flavour = override.includes('cli') || override.includes('cpp') ? 'cpp' : 'python';
     if (await binaryExists(override)) return { bin: override, flavour };
   }
   for (const cand of KNOWN_BINARIES) {
-    if (await binaryExists(cand.bin)) return cand;
+    if (await binaryExists(cand.bin)) {
+      _detectedCache = cand;
+      return cand;
+    }
   }
+  _detectedCache = null;
   return null;
 }
 
+/**
+ * Probe a binary by running `<bin> --help`. Timeout is generous (20s)
+ * because whisper.cpp's brew build spins up Metal/BLAS backends even
+ * for --help — observed ~6-10s real time on M-series chips. Better to
+ * wait a few seconds at boot than to spuriously decide whisper isn't
+ * installed when it is.
+ */
 function binaryExists(bin: string): Promise<boolean> {
   return new Promise((resolve) => {
     const proc = spawn(bin, ['--help'], { stdio: ['ignore', 'pipe', 'pipe'] });
     let settled = false;
     proc.on('error', () => { if (!settled) { settled = true; resolve(false); } });
     proc.on('close', (code) => { if (!settled) { settled = true; resolve(code === 0); } });
-    setTimeout(() => { if (!settled) { settled = true; try { proc.kill(); } catch {} resolve(false); } }, 5000);
+    setTimeout(() => { if (!settled) { settled = true; try { proc.kill(); } catch {} resolve(false); } }, 20_000);
   });
 }
 
@@ -78,11 +101,31 @@ const FFMPEG_CANDIDATES = [
   '/usr/local/bin/ffmpeg',     // Intel brew
 ];
 
+let _ffmpegCache: string | null | undefined = undefined;
+
 async function detectFfmpeg(): Promise<string | null> {
+  if (_ffmpegCache !== undefined) return _ffmpegCache;
   for (const cand of FFMPEG_CANDIDATES) {
-    if (await binaryExists(cand)) return cand;
+    if (await binaryExists(cand)) {
+      _ffmpegCache = cand;
+      return cand;
+    }
   }
+  _ffmpegCache = null;
   return null;
+}
+
+/**
+ * Pre-warm the binary detection cache at agent boot so the first voice
+ * message after restart doesn't pay the ~10s whisper-cli probe cost
+ * inline with the user's reply. Best-effort: failures are non-fatal
+ * and just defer the cost to first use.
+ */
+export async function prewarmTranscribeDetection(): Promise<void> {
+  await Promise.all([
+    detectWhisper().catch(() => null),
+    detectFfmpeg().catch(() => null),
+  ]);
 }
 
 /**
