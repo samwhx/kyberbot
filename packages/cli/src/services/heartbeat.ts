@@ -42,7 +42,7 @@ function parseIntervalMs(intervalStr: string): number {
  * returned. Schedule and window are kept as raw strings; `isTaskDue` does
  * the interpretation.
  */
-interface ParsedTask { name: string; schedule: string; window?: string }
+interface ParsedTask { name: string; schedule: string; window?: string; precheck?: string }
 function parseHeartbeatTasks(content: string): ParsedTask[] {
   const tasks: ParsedTask[] = [];
   const afterTasks = content.split(/^##\s+Tasks\b/im)[1];
@@ -52,11 +52,17 @@ function parseHeartbeatTasks(content: string): ParsedTask[] {
     const nameMatch = block.match(/^([^\n]+)/);
     const scheduleMatch = block.match(/\*\*Schedule\*\*:\s*([^\n]+)/i);
     const windowMatch = block.match(/\*\*Window\*\*:\s*([^\n]+)/i);
+    // **Pre-check**: <bash> — when present, run before building the
+    // Claude prompt. If the command exits 0 with `wakeAgent: false` in
+    // its stdout, skip the LLM for this tick (Phase 5.4). Lets cheap
+    // status-questions ("any new PRs?") not burn tokens on no-ops.
+    const precheckMatch = block.match(/\*\*Pre-check\*\*:\s*([^\n]+)/i);
     if (nameMatch && scheduleMatch) {
       tasks.push({
         name: nameMatch[1].trim(),
         schedule: scheduleMatch[1].trim(),
         ...(windowMatch ? { window: windowMatch[1].trim() } : {}),
+        ...(precheckMatch ? { precheck: precheckMatch[1].trim() } : {}),
       });
     }
   }
@@ -119,6 +125,80 @@ function parseDailyTimeOfDay(schedule: string): number | null {
  * Unknown schedule syntax is treated as "may be due" — conservative so we
  * don't silently suppress real work.
  */
+/**
+ * Run each due task's optional Pre-check shell command (Phase 5.4).
+ * Returns `true` if at least one task wants the agent woken — either it
+ * has no pre-check, OR its pre-check returns a "wakeAgent" signal that
+ * isn't false. Designed to be conservative: parse errors, non-zero
+ * exits, and timeouts all default to "wake" so we don't accidentally
+ * silence a task.
+ *
+ * Each pre-check is given 10s, must not write to stderr to be trusted,
+ * and is expected to print one of:
+ *   wakeAgent: true | false
+ *   wakeAgent=true | false
+ *   {"wakeAgent": true | false}
+ */
+async function dueTasksWantWake(dueTasks: ParsedTask[]): Promise<boolean> {
+  if (dueTasks.length === 0) return false;
+  let anyWake = false;
+  for (const t of dueTasks) {
+    if (!t.precheck) {
+      anyWake = true;
+      continue;
+    }
+    const want = await runPrecheck(t.name, t.precheck);
+    if (want) anyWake = true;
+  }
+  return anyWake;
+}
+
+async function runPrecheck(taskName: string, cmd: string): Promise<boolean> {
+  const { spawn } = await import('node:child_process');
+  return new Promise<boolean>((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const proc = spawn('bash', ['-c', cmd], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+      logger.warn('Pre-check timed out — defaulting to wake', { task: taskName });
+      resolve(true);
+    }, 10_000);
+    proc.stdout.on('data', (c) => { stdout += c.toString(); });
+    proc.stderr.on('data', (c) => { stderr += c.toString(); });
+    proc.on('error', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      logger.warn('Pre-check spawn failed — defaulting to wake', { task: taskName });
+      resolve(true);
+    });
+    proc.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0) {
+        logger.debug('Pre-check non-zero exit — defaulting to wake', { task: taskName, code, stderr: stderr.slice(0, 200) });
+        resolve(true);
+        return;
+      }
+      const out = stdout.trim();
+      // Match `wakeAgent: false`, `wakeAgent=false`, or JSON {"wakeAgent":false}.
+      const falseMatch = /wake[A-Za-z]*\s*[:=]\s*false|\"wake[A-Za-z]*\"\s*:\s*false/i.test(out);
+      const trueMatch = /wake[A-Za-z]*\s*[:=]\s*true|\"wake[A-Za-z]*\"\s*:\s*true/i.test(out);
+      if (falseMatch && !trueMatch) {
+        logger.debug('Pre-check declined wake', { task: taskName });
+        resolve(false);
+      } else {
+        resolve(true);
+      }
+    });
+  });
+}
+
 function isTaskDue(task: ParsedTask, lastCheckIso: string | undefined, now: Date, tz: string): boolean {
   // Window gate — applies regardless of schedule type.
   if (task.window) {
@@ -283,8 +363,21 @@ async function tick(root: string): Promise<void> {
       : { lastChecks: {} };
     const tasks = parseHeartbeatTasks(content);
     const tz = getIdentityForRoot(root).timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (tasks.length > 0 && !tasks.some((t) => isTaskDue(t, stateEarly.lastChecks?.[t.name], new Date(), tz))) {
+    const dueTasks = tasks.filter((t) => isTaskDue(t, stateEarly.lastChecks?.[t.name], new Date(), tz));
+    if (tasks.length > 0 && dueTasks.length === 0) {
       logger.debug(`Heartbeat skipped — no task due yet (${tasks.length} scheduled)`);
+      return;
+    }
+
+    // Phase 5.4: pre-check. For every due task that declares a
+    // **Pre-check**: <bash>, run it. If ALL due tasks' pre-checks
+    // return `wakeAgent: false` in stdout (or `wakeAgent=false` plain),
+    // skip the Claude invocation entirely — saves the subprocess for
+    // "no new mail / no new PRs / nothing happened" status questions.
+    // Tasks without a pre-check are always considered "wake".
+    const wakeNeeded = await dueTasksWantWake(dueTasks);
+    if (!wakeNeeded) {
+      logger.debug('Heartbeat skipped via pre-check — no due task wants wake');
       return;
     }
   } catch (err) {

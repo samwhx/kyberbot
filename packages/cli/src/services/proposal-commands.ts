@@ -91,7 +91,7 @@ export async function tryRunProposalCommand(
       continue;
     }
     if (parsed.action === 'approve') {
-      const r = applyProposal(root, proposal);
+      const r = await applyProposal(root, proposal);
       if (r.applied) {
         result.results.push({ id, status: 'applied', commit: r.commitHash });
       } else {

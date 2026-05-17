@@ -147,12 +147,12 @@ describe('applyProposal', () => {
 -old line
 +new terse line`;
 
-  it('applies a valid diff and creates a commit + tag', () => {
+  it('applies a valid diff and creates a commit + tag', async () => {
     const p = createProposal(root, {
       type: 'personality_tweak', target_path: 'SOUL.md',
       title: 'Tighten tone', why: 'a', diff: VALID_DIFF,
     });
-    const result = applyProposal(root, p);
+    const result = await applyProposal(root, p);
     expect(result.applied).toBe(true);
     expect(result.commitHash).toMatch(/^[a-f0-9]+$/);
     expect(readFileSync(join(root, 'SOUL.md'), 'utf-8')).toContain('new terse line');
@@ -167,29 +167,29 @@ describe('applyProposal', () => {
     expect(refreshed?.frontmatter.applied_commit).toBe(result.commitHash);
   });
 
-  it('refuses to apply if target_path is on hard-never list', () => {
+  it('refuses to apply if target_path is on hard-never list', async () => {
     const p = createProposal(root, {
       type: 'other', target_path: '.env', title: 'evil', why: 'x', diff: VALID_DIFF,
     });
-    const result = applyProposal(root, p);
+    const result = await applyProposal(root, p);
     expect(result.applied).toBe(false);
     expect(result.reason).toMatch(/hard-never/);
     const refreshed = findProposal(root, p.frontmatter.id);
     expect(refreshed?.frontmatter.status).toBe('rejected_blocked');
   });
 
-  it('refuses to apply if working tree is dirty', () => {
+  it('refuses to apply if working tree is dirty', async () => {
     writeFileSync(join(root, 'SOUL.md'), 'dirty edit\n');
     const p = createProposal(root, {
       type: 'personality_tweak', target_path: 'SOUL.md',
       title: 'X', why: 'x', diff: VALID_DIFF,
     });
-    const result = applyProposal(root, p);
+    const result = await applyProposal(root, p);
     expect(result.applied).toBe(false);
     expect(result.reason).toMatch(/dirty/);
   });
 
-  it('refuses to apply if proposal has no diff fence', () => {
+  it('refuses to apply if proposal has no diff fence', async () => {
     // Manually craft a proposal file without a diff fence
     const p = createProposal(root, {
       type: 'other', target_path: 'SOUL.md', title: 'X', why: 'x', diff: 'no diff here',
@@ -200,7 +200,7 @@ describe('applyProposal', () => {
     git(root, ['add', '--', p.filePath]);
     git(root, ['commit', '-q', '-m', 'strip diff fence for test']);
     const fresh = findProposal(root, p.frontmatter.id)!;
-    const result = applyProposal(root, fresh);
+    const result = await applyProposal(root, fresh);
     expect(result.applied).toBe(false);
     expect(result.reason).toMatch(/no diff/i);
   });
@@ -213,12 +213,12 @@ describe('revertProposal', () => {
 -old line
 +new terse line`;
 
-  it('reverts an applied proposal via git revert', () => {
+  it('reverts an applied proposal via git revert', async () => {
     const p = createProposal(root, {
       type: 'personality_tweak', target_path: 'SOUL.md',
       title: 'X', why: 'x', diff: VALID_DIFF,
     });
-    applyProposal(root, p);
+    await applyProposal(root, p);
     const refreshed = findProposal(root, p.frontmatter.id)!;
     const result = revertProposal(root, refreshed);
     expect(result.applied).toBe(true);

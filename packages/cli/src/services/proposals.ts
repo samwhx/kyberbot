@@ -50,6 +50,15 @@ export type ProposalType =
   | 'heartbeat_change'
   | 'identity_update'
   | 'brain_note'
+  // ── Phase 5: autonomous action types ──────────────────────────────
+  // These don't modify files in the repo; they trigger external actions
+  // when approved. Each has a registered handler in services/
+  // proposal-handlers/ that knows how to execute it (and how to
+  // refuse if a hard rule is violated).
+  | 'email_draft'        // Send the draft body via Gmail
+  | 'calendar_action'    // Create/update a Google Calendar event
+  | 'file_edit'          // Apply a diff to a file outside SOUL/USER/HEARTBEAT
+  | 'external_send'      // Generic outbound: webhook, IFTTT, etc.
   | 'other';
 
 export interface ProposalFrontmatter {
@@ -269,8 +278,36 @@ export function rejectProposal(root: string, proposal: Proposal): ApplyResult {
  * Hard-never path check is enforced here regardless of how the proposal was
  * drafted — defense in depth against bad detector output.
  */
-export function applyProposal(root: string, proposal: Proposal): ApplyResult {
+export async function applyProposal(root: string, proposal: Proposal): Promise<ApplyResult> {
   const target = proposal.frontmatter.target_path;
+
+  // ── Phase 5: action-proposal handler dispatch ──────────────────────
+  // For email_draft / calendar_action / external_send, hand off to the
+  // registered handler instead of running git apply. These don't touch
+  // the repo; they execute external API calls. The handler is
+  // responsible for its own destination validation (e.g. recipient
+  // blocklist) on top of the global hard-never path check below.
+  try {
+    const { getHandler } = await import('./proposal-handlers/index.js');
+    const handler = getHandler(proposal.frontmatter.type);
+    if (handler) {
+      const result = await handler(root, proposal);
+      if (result.applied) {
+        proposal.frontmatter.status = 'applied';
+        proposal.frontmatter.applied_at = new Date().toISOString();
+        if (result.artifact_id) {
+          (proposal.frontmatter as ProposalFrontmatter & { artifact_id?: string }).artifact_id = result.artifact_id;
+        }
+        writeProposalFile(proposal);
+        logger.info('Proposal applied via handler', { id: proposal.frontmatter.id, type: proposal.frontmatter.type, artifact: result.artifact_id });
+        return { proposal, applied: true };
+      } else {
+        return { proposal, applied: false, reason: result.reason ?? 'handler refused' };
+      }
+    }
+  } catch (err) {
+    logger.warn('Handler dispatch failed; falling through to git-apply path', { error: String(err) });
+  }
 
   if (isHardNever(target)) {
     proposal.frontmatter.status = 'rejected_blocked';

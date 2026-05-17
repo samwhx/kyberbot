@@ -207,6 +207,73 @@ export function createWebApiRouter(root: string): Router {
     }
   });
 
+  // ── Proposals (Phase 5.3) ─────────────────────────────────────────
+  // GET  /proposals             — list pending proposals
+  // POST /proposals/:id/approve — apply (or run handler) + return result
+  // POST /proposals/:id/reject  — flip status to rejected
+  router.get('/proposals', async (_req, res) => {
+    try {
+      const { listProposals } = await import('../services/proposals.js');
+      const all = listProposals(root, { status: 'pending' }).map((p) => ({
+        id: p.frontmatter.id,
+        type: p.frontmatter.type,
+        target_path: p.frontmatter.target_path,
+        status: p.frontmatter.status,
+        created: p.frontmatter.created,
+        priority: p.frontmatter.priority,
+        body_preview: p.body.slice(0, 500),
+      }));
+      res.json({ proposals: all });
+    } catch (err) {
+      logger.error('Failed to list proposals', { error: String(err) });
+      res.status(500).json({ error: 'Failed to list proposals' });
+    }
+  });
+
+  router.post('/proposals/:id/approve', async (req, res) => {
+    try {
+      const { findProposal, applyProposal } = await import('../services/proposals.js');
+      const proposal = findProposal(root, req.params.id);
+      if (!proposal) {
+        res.status(404).json({ error: `Proposal not found: ${req.params.id}` });
+        return;
+      }
+      if (proposal.frontmatter.status !== 'pending') {
+        res.status(409).json({ error: `Proposal is ${proposal.frontmatter.status}, not pending` });
+        return;
+      }
+      const result = await applyProposal(root, proposal);
+      if (result.applied) {
+        res.json({ ok: true, id: proposal.frontmatter.id, commitHash: result.commitHash });
+      } else {
+        res.status(400).json({ ok: false, id: proposal.frontmatter.id, reason: result.reason });
+      }
+    } catch (err) {
+      logger.error('Failed to approve proposal', { error: String(err) });
+      res.status(500).json({ error: 'Failed to approve proposal' });
+    }
+  });
+
+  router.post('/proposals/:id/reject', async (req, res) => {
+    try {
+      const { findProposal, rejectProposal } = await import('../services/proposals.js');
+      const proposal = findProposal(root, req.params.id);
+      if (!proposal) {
+        res.status(404).json({ error: `Proposal not found: ${req.params.id}` });
+        return;
+      }
+      if (proposal.frontmatter.status !== 'pending') {
+        res.status(409).json({ error: `Proposal is ${proposal.frontmatter.status}, not pending` });
+        return;
+      }
+      rejectProposal(root, proposal);
+      res.json({ ok: true, id: proposal.frontmatter.id });
+    } catch (err) {
+      logger.error('Failed to reject proposal', { error: String(err) });
+      res.status(500).json({ error: 'Failed to reject proposal' });
+    }
+  });
+
   return router;
 }
 

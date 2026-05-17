@@ -72,7 +72,7 @@ function handleShow(id: string): void {
   console.log(formatProposal(p, { full: true }));
 }
 
-function handleApprove(ids: string[]): void {
+async function handleApprove(ids: string[]): Promise<void> {
   const root = getRoot();
   for (const id of ids) {
     const p = findProposal(root, id);
@@ -84,7 +84,7 @@ function handleApprove(ids: string[]): void {
       console.error(chalk.red(`✗ ${id}: status is ${p.frontmatter.status}, not pending`));
       continue;
     }
-    const result = applyProposal(root, p);
+    const result = await applyProposal(root, p);
     if (result.applied) {
       console.log(chalk.green(`✓ ${id}: applied`) + chalk.dim(` (${result.commitHash?.slice(0, 7)})`));
     } else {
