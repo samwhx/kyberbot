@@ -146,18 +146,22 @@ export function createRunCommand(): Command {
         // claude.ts adapter silently falls back to a one-shot
         // subprocess — defeating the point. agent-runtime.ts already
         // calls this for fleet mode; the single-agent path needed its
-        // own call site.
+        // own call site. The pool itself logs "warm Claude pool
+        // initialized" on success.
         try {
           const { isWarmPoolEnabled, initWarmPool } = await import('../runtime/warm-claude-pool.js');
           const { getIdentity } = await import('../config.js');
-          const identity = getIdentity();
-          if (isWarmPoolEnabled(identity.claude?.warm_pool)) {
+          let warmPoolIdentityFlag: boolean | undefined;
+          try {
+            warmPoolIdentityFlag = getIdentity().claude?.warm_pool;
+          } catch { /* identity may not be loadable yet; defaults apply */ }
+          if (isWarmPoolEnabled(warmPoolIdentityFlag)) {
             initWarmPool();
           }
         } catch (err) {
-          // Non-fatal: channels will still work via the subprocess path.
-          // Logged via the warm-pool's own logger if init does run.
-          void err;
+          // Visible so silent fallback can't hide a real bug.
+          const { createLogger } = await import('../logger.js');
+          createLogger('warm-pool').warn('init failed; falling back to one-shot subprocess', { error: String(err) });
         }
 
         // Show splash screen
