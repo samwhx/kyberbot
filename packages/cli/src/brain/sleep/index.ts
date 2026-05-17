@@ -27,6 +27,7 @@ import { runProfileStep, ProfileResult } from './steps/profile.js';
 import { runReasoningStep, ReasoningResult } from './steps/reasoning.js';
 import { runOutcomeAnnotatorStep, OutcomeAnnotatorResult } from './steps/outcome-annotator.js';
 import { runArchiveStep, ArchiveResult } from './steps/archive.js';
+import { runSynthesizeWikiStep, SynthesizeWikiResult } from './steps/synthesize-wiki.js';
 import { saveCheckpoint } from './utils/checkpoint.js';
 
 const logger = createLogger('sleep-agent');
@@ -44,6 +45,7 @@ export interface RunMetrics {
   entityHygiene?: EntityHygieneResult & { durationMs: number };
   outcomeAnnotator?: OutcomeAnnotatorResult & { durationMs: number };
   archive?: ArchiveResult & { durationMs: number };
+  synthesizeWiki?: SynthesizeWikiResult & { durationMs: number };
   totalDurationMs: number;
 }
 
@@ -205,6 +207,20 @@ export async function startSleepAgent(
         durationMs: metrics.archive.durationMs,
       });
       logger.info('Archive step completed', { runId, heapMB: memMB(), ...metrics.archive });
+
+      // Step 9: Synthesize wiki — render brain/wiki/<type>/<slug>.md
+      // for significant entities. Phase 3.2. Cheap (no LLM), purely a
+      // structured render of entity_relations data we already have.
+      saveCheckpoint(db, runId, 'synthesize-wiki');
+      const wikiStart = Date.now();
+      const wikiResult = await runSynthesizeWikiStep(root, cfg);
+      metrics.synthesizeWiki = { ...wikiResult, durationMs: Date.now() - wikiStart };
+      recordTelemetry(db, runId, 'synthesize-wiki', {
+        count: wikiResult.count,
+        processed: wikiResult.processed,
+        durationMs: metrics.synthesizeWiki.durationMs,
+      });
+      logger.info('Synthesize-wiki step completed', { runId, heapMB: memMB(), ...metrics.synthesizeWiki });
 
       // Complete run
       const totalDuration = Date.now() - startTime;
