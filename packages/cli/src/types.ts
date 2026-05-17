@@ -101,6 +101,24 @@ export interface IdentityConfig {
   memory?: {
     entity_stoplist?: string[];
   };
+  /**
+   * Memory/brain configuration. Currently exposes `embedder` so the
+   * agent can swap the vector embedding source between cloud OpenAI
+   * (default) and local Ollama (privacy-first, zero ongoing cost).
+   */
+  brain?: {
+    embedder?: 'openai' | 'ollama';
+    /**
+     * Override the embedding model name. For openai this is
+     * 'text-embedding-3-small' or 'text-embedding-3-large'. For ollama
+     * it's any model pulled locally (default: 'nomic-embed-text').
+     */
+    embedding_model?: string;
+    /**
+     * Ollama endpoint (default: http://localhost:11434).
+     */
+    ollama_endpoint?: string;
+  };
   subscriptions?: Array<{
     from: string;
     topic: string;

@@ -11,6 +11,7 @@ import { ChromaClient, Collection, type IEmbeddingFunction } from 'chromadb';
 import OpenAI from 'openai';
 import { createLogger } from '../logger.js';
 import { getIdentity, getIdentityForRoot } from '../config.js';
+import { getEmbedder } from './embedders.js';
 
 const logger = createLogger('embeddings');
 
@@ -57,6 +58,20 @@ export interface SearchResult {
  * Falls back to getIdentity() or 'kyberbot_data'.
  */
 function getCollectionNameForRoot(root?: string): string {
+  // Embedder suffix lets us coexist multiple embedders (e.g. openai +
+  // ollama) without dimension conflicts. Switching the embedder
+  // creates a fresh empty collection rather than corrupting the
+  // existing index.
+  let embedderSuffix = '';
+  try {
+    const e = getEmbedder(root);
+    if (e.name && e.name !== 'openai') {
+      embedderSuffix = `_${e.name}`;
+    }
+  } catch {
+    /* fall through */
+  }
+
   try {
     const identity = root ? getIdentityForRoot(root) : getIdentity();
     if (identity.agent_name) {
@@ -66,13 +81,13 @@ function getCollectionNameForRoot(root?: string): string {
         .replace(/^[^a-z0-9]+/, '')
         .replace(/[^a-z0-9]+$/, '');
       if (sanitized.length >= 1) {
-        return `kyberbot_${sanitized}`;
+        return `kyberbot_${sanitized}${embedderSuffix}`;
       }
     }
   } catch {
     // identity.yaml not available — use default
   }
-  return 'kyberbot_data';
+  return `kyberbot_data${embedderSuffix}`;
 }
 
 const CONFIG = {
@@ -106,22 +121,13 @@ export function getOpenAIClient(): OpenAI {
   return openaiClient;
 }
 
-async function generateEmbedding(text: string): Promise<number[]> {
-  const client = getOpenAIClient();
-  const response = await client.embeddings.create({
-    model: CONFIG.EMBEDDING_MODEL,
-    input: text,
-  });
-  return response.data[0].embedding;
+async function generateEmbedding(text: string, root?: string): Promise<number[]> {
+  const out = await getEmbedder(root).embed([text]);
+  return out[0];
 }
 
-async function generateEmbeddings(texts: string[]): Promise<number[][]> {
-  const client = getOpenAIClient();
-  const response = await client.embeddings.create({
-    model: CONFIG.EMBEDDING_MODEL,
-    input: texts,
-  });
-  return response.data.map((d) => d.embedding);
+async function generateEmbeddings(texts: string[], root?: string): Promise<number[][]> {
+  return getEmbedder(root).embed(texts);
 }
 
 export async function initializeEmbeddings(root?: string): Promise<boolean> {
@@ -129,8 +135,20 @@ export async function initializeEmbeddings(root?: string): Promise<boolean> {
   if (!chromaInitialized) {
     chromaInitialized = true;
 
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (!openaiKey) {
+    // Embedder selection happens lazily in getEmbedder(); we just need
+    // *some* embedder to be constructible. OpenAI requires a key;
+    // Ollama needs a running daemon. Fail fast at boot if neither
+    // works.
+    let embedder;
+    try {
+      embedder = getEmbedder(root);
+    } catch (err) {
+      logger.warn('No embedder available — embeddings disabled', { error: String(err) });
+      return false;
+    }
+    // OpenAI requires the key at boot — disable embeddings without it
+    // to match pre-Phase-1.1 behaviour.
+    if (embedder.name === 'openai' && !process.env.OPENAI_API_KEY) {
       logger.warn('OPENAI_API_KEY not set - embeddings disabled');
       return false;
     }
@@ -155,19 +173,26 @@ export async function initializeEmbeddings(root?: string): Promise<boolean> {
   // Initialize per-agent collection if root is given and not yet loaded
   if (root && !collections.has(root)) {
     try {
-      const openaiEmbedder: IEmbeddingFunction = {
+      const adapterEmbedder: IEmbeddingFunction = {
         generate: async (texts: string[]): Promise<number[][]> => {
-          return generateEmbeddings(texts);
+          return generateEmbeddings(texts, root);
         },
       };
 
       const collectionName = getCollectionNameForRoot(root);
       const col = await chromaClient.getOrCreateCollection({
         name: collectionName,
-        embeddingFunction: openaiEmbedder,
+        embeddingFunction: adapterEmbedder,
         metadata: {
           description: 'KyberBot semantic search index',
+          // ChromaDB HNSW config (Phase 1.6). 'cosine' was already set;
+          // M and ef params bumped from defaults so search stays
+          // sub-second past the 10k-vector mark. Construction is one-
+          // time; query-time effort is bounded by ef:search.
           'hnsw:space': 'cosine',
+          'hnsw:M': 32,
+          'hnsw:construction_ef': 200,
+          'hnsw:search_ef': 100,
         },
       });
 
@@ -180,19 +205,26 @@ export async function initializeEmbeddings(root?: string): Promise<boolean> {
   } else if (!root && collections.size === 0) {
     // Backward compat: no root given, use legacy getCollectionName
     try {
-      const openaiEmbedder: IEmbeddingFunction = {
+      const adapterEmbedder: IEmbeddingFunction = {
         generate: async (texts: string[]): Promise<number[][]> => {
-          return generateEmbeddings(texts);
+          return generateEmbeddings(texts, root);
         },
       };
 
       const collectionName = getCollectionNameForRoot();
       const col = await chromaClient.getOrCreateCollection({
         name: collectionName,
-        embeddingFunction: openaiEmbedder,
+        embeddingFunction: adapterEmbedder,
         metadata: {
           description: 'KyberBot semantic search index',
+          // ChromaDB HNSW config (Phase 1.6). 'cosine' was already set;
+          // M and ef params bumped from defaults so search stays
+          // sub-second past the 10k-vector mark. Construction is one-
+          // time; query-time effort is bounded by ef:search.
           'hnsw:space': 'cosine',
+          'hnsw:M': 32,
+          'hnsw:construction_ef': 200,
+          'hnsw:search_ef': 100,
         },
       });
 
@@ -293,7 +325,7 @@ export async function indexDocument(
 
   try {
     // Generate embeddings for all chunks
-    const embeddings = await generateEmbeddings(chunks.map((c) => c.text));
+    const embeddings = await generateEmbeddings(chunks.map((c) => c.text), root);
 
     const ids: string[] = [];
     const documents: string[] = [];
@@ -378,7 +410,7 @@ export async function semanticSearch(
 
   try {
     // Generate embedding for query
-    const queryEmbedding = await generateEmbedding(query);
+    const queryEmbedding = await generateEmbedding(query, root);
 
     // Build where filter — combine type + ARP metadata filters into a
     // single $and clause when more than one is set. ChromaDB requires
