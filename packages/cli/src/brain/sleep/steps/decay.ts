@@ -11,6 +11,8 @@
 import { createLogger } from '../../../logger.js';
 import { getTimelineDb } from '../../timeline.js';
 import { ensureFactsTable } from '../../fact-store.js';
+import { getSleepDb } from '../db.js';
+import { pageByIdWithCheckpoint } from '../utils/streaming.js';
 import { SleepConfig } from '../config.js';
 
 const logger = createLogger('sleep:decay');
@@ -59,13 +61,16 @@ export async function runDecayStep(
   }
 
   try {
-    const items = db.prepare(`
-      SELECT id, title, source_path, timestamp, priority, decay_score, access_count, is_pinned
-      FROM timeline_events
-      WHERE tier != 'archive' OR tier IS NULL
-      ORDER BY priority DESC
-      LIMIT ?
-    `).all(config.batchSize * 2) as Array<{
+    // Phase 1.3 streaming: page through non-archived items by id with a
+    // checkpoint that resumes from the last visited row in the next
+    // cycle. Bounded by config.batchSize * 2 rows per cycle so we never
+    // re-load the whole table into memory. The cursor wraps to 0 when
+    // it runs off the end, so eventual coverage is guaranteed without
+    // ever holding >500 rows in memory.
+    const sleepDb = getSleepDb(root);
+    const updateStmt = db.prepare(`UPDATE timeline_events SET decay_score = ?, priority = ? WHERE id = ?`);
+
+    const { processed: streamed } = await pageByIdWithCheckpoint<{
       id: number;
       title: string | null;
       source_path: string;
@@ -74,50 +79,54 @@ export async function runDecayStep(
       decay_score: number | null;
       access_count: number | null;
       is_pinned: number | null;
-    }>;
+    }>(
+      db,         // SELECT runs against timeline.db
+      sleepDb,    // cursor persists in sleep.db's sleep_telemetry
+      'decay-step',
+      `SELECT id, title, source_path, timestamp, priority, decay_score, access_count, is_pinned
+       FROM timeline_events
+       WHERE (tier != 'archive' OR tier IS NULL) AND id > ?
+       ORDER BY id ASC LIMIT ?`,
+      [],
+      (item) => {
+        try {
+          if (item.is_pinned) return;
 
-    processed = items.length;
+          const timestamp = new Date(item.timestamp).getTime();
+          const ageHours = (now - timestamp) / (1000 * 60 * 60);
 
-    for (const item of items) {
-      try {
-        if (item.is_pinned) continue;
+          const decayBoost = Math.min(config.maxDecay * 0.2, ageHours * config.decayRatePerHour);
 
-        const timestamp = new Date(item.timestamp).getTime();
-        const ageHours = (now - timestamp) / (1000 * 60 * 60);
+          let effectiveDecayBoost = decayBoost;
+          if (isRepetitiveContent(item.title || '') && config.repetitiveDecayMultiplier) {
+            effectiveDecayBoost *= config.repetitiveDecayMultiplier;
+          }
 
-        const decayBoost = Math.min(config.maxDecay * 0.2, ageHours * config.decayRatePerHour);
+          const newDecay = Math.min(config.maxDecay, (item.decay_score || 0) + effectiveDecayBoost);
 
-        // Apply extra decay for repetitive content (heartbeat tasks, etc.)
-        let effectiveDecayBoost = decayBoost;
-        if (isRepetitiveContent(item.title || '') && config.repetitiveDecayMultiplier) {
-          effectiveDecayBoost *= config.repetitiveDecayMultiplier;
+          const accessBoost = isRepetitiveContent(item.title || '')
+            ? 0
+            : Math.min(0.3, (item.access_count || 0) * 0.05);
+          const decayPenalty = effectiveDecayBoost / 2;
+          const newPriority = Math.max(0, Math.min(1, (item.priority ?? 0.5) - decayPenalty + accessBoost));
+
+          const decayChanged = Math.abs(newDecay - (item.decay_score || 0)) > 0.001;
+          const priorityChanged = Math.abs(newPriority - (item.priority ?? 0.5)) > 0.001;
+
+          if (decayChanged || priorityChanged) {
+            updateStmt.run(newDecay, newPriority, item.id);
+            updated++;
+          }
+        } catch (error) {
+          errors.push(`Failed to decay item ${item.id}: ${error}`);
         }
+      },
+      { pageSize: 500, maxRows: config.batchSize * 2 },
+    );
 
-        const newDecay = Math.min(config.maxDecay, (item.decay_score || 0) + effectiveDecayBoost);
+    processed = streamed;
 
-        const accessBoost = isRepetitiveContent(item.title || '')
-          ? 0  // repetitive content doesn't benefit from access count
-          : Math.min(0.3, (item.access_count || 0) * 0.05);
-        const decayPenalty = effectiveDecayBoost / 2;
-        const newPriority = Math.max(0, Math.min(1, (item.priority ?? 0.5) - decayPenalty + accessBoost));
-
-        const decayChanged = Math.abs(newDecay - (item.decay_score || 0)) > 0.001;
-        const priorityChanged = Math.abs(newPriority - (item.priority ?? 0.5)) > 0.001;
-
-        if (decayChanged || priorityChanged) {
-          db.prepare(`
-            UPDATE timeline_events
-            SET decay_score = ?, priority = ?
-            WHERE id = ?
-          `).run(newDecay, newPriority, item.id);
-          updated++;
-        }
-      } catch (error) {
-        errors.push(`Failed to decay item ${item.id}: ${error}`);
-      }
-    }
-
-    logger.debug('Decay step completed', { processed: items.length, updated });
+    logger.debug('Decay step completed', { processed, updated });
   } catch (error) {
     logger.error('Decay step failed', { error: String(error) });
     errors.push(`Decay step failed: ${error}`);
@@ -153,6 +162,48 @@ export async function runDecayStep(
 
       if (factDecay.changes > 0) {
         logger.info(`Decayed confidence on ${factDecay.changes} old unreinforced facts`);
+      }
+
+      // Phase 1.4: fact purging. Facts that have decayed below
+      // PURGE_CONFIDENCE_THRESHOLD AND haven't been verified in
+      // PURGE_AGE_DAYS AND aren't referenced by any pinned entity are
+      // deleted outright. The sleep_telemetry audit row records what
+      // was purged so you can spot anomalies in `kyberbot sleep status`.
+      const PURGE_CONFIDENCE_THRESHOLD = 0.15;
+      const PURGE_AGE_DAYS = 180;
+      try {
+        const purgeResult = factsDb.prepare(`
+          DELETE FROM facts
+          WHERE confidence <= ?
+            AND COALESCE(is_retracted, 0) = 0
+            AND (last_verified IS NULL OR last_verified < datetime('now', '-' || ? || ' days'))
+            AND (last_reinforced_at IS NULL OR last_reinforced_at < datetime('now', '-' || ? || ' days'))
+            AND entity_id NOT IN (
+              SELECT id FROM entities WHERE is_pinned = 1
+            )
+        `).run(PURGE_CONFIDENCE_THRESHOLD, PURGE_AGE_DAYS, PURGE_AGE_DAYS);
+
+        if (purgeResult.changes > 0) {
+          logger.info(`Purged ${purgeResult.changes} stale low-confidence facts`);
+
+          // Record audit row in sleep_telemetry so the operator can see
+          // what got removed at-a-glance in sleep status.
+          try {
+            const sleepDb = getSleepDb(root);
+            sleepDb.prepare(`
+              INSERT INTO sleep_telemetry (step, event_type, count, metadata)
+              VALUES ('decay', 'fact-purge', ?, ?)
+            `).run(purgeResult.changes, JSON.stringify({
+              threshold: PURGE_CONFIDENCE_THRESHOLD,
+              ageDays: PURGE_AGE_DAYS,
+            }));
+          } catch { /* non-fatal */ }
+        }
+      } catch (err) {
+        // Likely: the `entities` table or one of the referenced columns
+        // is missing in tests / fresh installs. Non-fatal — confidence
+        // decay above still kept old facts under control.
+        logger.debug('Fact purge skipped', { error: String(err) });
       }
     }
   } catch {
