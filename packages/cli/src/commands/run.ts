@@ -141,6 +141,25 @@ export function createRunCommand(): Command {
         // Initialize monitoring (Sentry, process error handlers)
         await initMonitoring();
 
+        // Initialize the warm Claude subprocess pool when enabled.
+        // Without this, channel handlers see warmPoolKey set and the
+        // claude.ts adapter silently falls back to a one-shot
+        // subprocess — defeating the point. agent-runtime.ts already
+        // calls this for fleet mode; the single-agent path needed its
+        // own call site.
+        try {
+          const { isWarmPoolEnabled, initWarmPool } = await import('../runtime/warm-claude-pool.js');
+          const { getIdentity } = await import('../config.js');
+          const identity = getIdentity();
+          if (isWarmPoolEnabled(identity.claude?.warm_pool)) {
+            initWarmPool();
+          }
+        } catch (err) {
+          // Non-fatal: channels will still work via the subprocess path.
+          // Logged via the warm-pool's own logger if init does run.
+          void err;
+        }
+
         // Show splash screen
         displaySplash(root);
 
