@@ -4,6 +4,24 @@
  * Defines the contract for messaging channel bridges.
  */
 
+/**
+ * Inbound binary attachment carried alongside a ChannelMessage. Today
+ * audio is fully wired (whisper.cpp transcription, Phase 2.3); image
+ * and document are reserved so future multimodal work can plug in
+ * without changing the channel contract again.
+ */
+export interface Attachment {
+  kind: 'audio' | 'image' | 'document';
+  /** MIME type from the wire (e.g. 'audio/ogg', 'image/jpeg'). */
+  mime: string;
+  /** Raw bytes pulled from the channel CDN. */
+  bytes: Buffer;
+  /** Filename if the channel exposes one; otherwise channel-derived. */
+  filename?: string;
+  /** Text transcription, when one applies (audio → STT). */
+  transcript?: string;
+}
+
 export interface ChannelMessage {
   id: string;
   channelType: string;
@@ -11,6 +29,8 @@ export interface ChannelMessage {
   text: string;
   timestamp: Date;
   metadata?: Record<string, unknown>;
+  /** Optional binary attachments. See Attachment above. */
+  attachments?: Attachment[];
 }
 
 export interface ChannelConfig {

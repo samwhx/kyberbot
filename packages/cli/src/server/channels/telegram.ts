@@ -23,6 +23,7 @@ import { Channel, ChannelMessage } from './types.js';
 import { storeConversation } from '../../brain/store-conversation.js';
 import { buildChannelSystemPrompt, buildStaticChannelSystemPrompt, buildPerTurnContextBlock } from './system-prompt.js';
 import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, buildHistoryBlock, clearHistory, escapeForXml } from './conversation-history.js';
+import { transcribe } from '../../services/transcribe.js';
 import { isWarmPoolEnabled, getWarmPool } from '../../runtime/warm-claude-pool.js';
 import { tryRunProposalCommand, formatProposalCommandReply } from '../../services/proposal-commands.js';
 import { maybeSpeakReply } from '../../services/speak-on-reply.js';
@@ -293,6 +294,118 @@ export class TelegramChannel implements Channel {
           logger.error('Failed to process Telegram message', { error: String(error) });
           await ctx.reply('Sorry, I encountered an error processing your message.');
         }
+      }
+    });
+
+    // Phase 2.3 — voice note handler. Owner-only. Downloads the file
+    // via Telegram getFile, transcribes via whisper.cpp, then replies
+    // with a synthesized prompt to Claude using the same path the text
+    // handler builds. Voice notes from non-owner are silently ignored.
+    this.bot.on(['message:voice', 'message:audio'], async (ctx) => {
+      const chatId = ctx.chat.id;
+      if (chatId !== this.ownerChatId) {
+        logger.debug(`Ignored voice from non-owner chat_id=${chatId}`);
+        return;
+      }
+      const userId = ctx.from?.id;
+
+      const voice = ctx.message.voice ?? ctx.message.audio;
+      if (!voice) return;
+
+      try {
+        await ctx.replyWithChatAction('typing');
+
+        // Resolve the file URL Telegram exposes for the duration of
+        // this request, fetch the bytes, transcribe.
+        const file = await ctx.api.getFile(voice.file_id);
+        const token = (this.bot as any)?.token ?? process.env.TELEGRAM_BOT_TOKEN;
+        if (!file.file_path || !token) {
+          logger.warn('Telegram voice: missing file_path or token; cannot download');
+          return;
+        }
+        const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          logger.warn('Telegram voice download failed', { status: res.status });
+          return;
+        }
+        const buffer = Buffer.from(await res.arrayBuffer());
+        const mime = (voice as any).mime_type ?? 'audio/ogg';
+
+        const result = await transcribe(buffer, mime, { root: this.root });
+        const text = result?.text ?? '[voice note — transcription unavailable]';
+        if (!result) {
+          logger.warn('Telegram voice: whisper produced no transcript');
+        } else {
+          logger.info('Telegram voice transcribed', { chars: result.text.length, cached: result.cached });
+        }
+
+        // Hand off to Claude through the same flow as a text message,
+        // minus the proposal intercept (voice can't say "approve <id>"
+        // anyway — that's a typed command).
+        const convoId = `telegram:${chatId}`;
+        const client = getClaudeClient();
+        const useWarmPool = isWarmPoolEnabled();
+        let prompt: string;
+        let systemPrompt: string | undefined;
+        let warmPoolKey: string | undefined;
+        let buildSystemPrompt: (() => Promise<string>) | undefined;
+
+        if (useWarmPool) {
+          const ctxBlock = await buildPerTurnContextBlock('telegram', text);
+          const ctxStr = ctxBlock.trim() ? `<context>\n${ctxBlock}\n</context>\n\n` : '';
+          const historyBlock = buildHistoryBlock(convoId);
+          const history = historyBlock ? `${historyBlock}\n\n` : '';
+          prompt = `${ctxStr}${history}<attachment kind="audio"><transcript>${escapeForXml(text)}</transcript></attachment>\n<user_message>${escapeForXml(text)}</user_message>`;
+          warmPoolKey = convoId;
+          buildSystemPrompt = () => buildStaticChannelSystemPrompt('telegram');
+        } else {
+          const base = buildPromptWithHistory(convoId, text);
+          prompt = base.replace(/<user_message>/, `<attachment kind="audio"><transcript>${escapeForXml(text)}</transcript></attachment>\n<user_message>`);
+          systemPrompt = await buildChannelSystemPrompt('telegram', text);
+        }
+
+        const receivedAt = new Date().toISOString();
+        const claudeStart = Date.now();
+        const reply = await client.complete(prompt, {
+          system: systemPrompt,
+          warmPoolKey,
+          buildSystemPrompt,
+          maxTurns: 30,
+          subprocess: !useWarmPool,
+          cwd: this.root,
+          tools: 'broad',
+        });
+        const latencyMs = Date.now() - claudeStart;
+        const repliedAt = new Date().toISOString();
+
+        pushUserMessage(convoId, text);
+        if (!reply || reply.trim().length === 0) return;
+        pushAssistantMessage(convoId, reply);
+
+        if (reply.length > 4096) {
+          for (const chunk of this.chunkMessage(reply, 4096)) await ctx.reply(chunk);
+        } else {
+          await ctx.reply(reply);
+        }
+
+        maybeSpeakReply(reply, this.root);
+        storeConversation(this.root, {
+          prompt: text,
+          response: reply,
+          channel: 'telegram',
+          metadata: { chatId, userId, fromVoice: true },
+          metrics: {
+            channel: 'telegram',
+            latency_ms: latencyMs,
+            reply_length_chars: reply.length,
+            received_at: receivedAt,
+            replied_at: repliedAt,
+          },
+        }).catch((err) => logger.warn('Memory storage failed', { error: String(err) }));
+      } catch (err) {
+        logger.error('Telegram voice handling failed', { error: String(err) });
+        try { await ctx.reply("Sorry — couldn't process that voice note."); } catch {}
       }
     });
 

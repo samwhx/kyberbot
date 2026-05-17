@@ -27,6 +27,7 @@ import { join } from 'path';
 import { storeConversation } from '../../brain/store-conversation.js';
 import { buildChannelSystemPrompt, buildStaticChannelSystemPrompt, buildPerTurnContextBlock } from './system-prompt.js';
 import { pushUserMessage, pushAssistantMessage, buildPromptWithHistory, buildHistoryBlock, escapeForXml } from './conversation-history.js';
+import { transcribe } from '../../services/transcribe.js';
 import { isWarmPoolEnabled } from '../../runtime/warm-claude-pool.js';
 import { tryRunProposalCommand, formatProposalCommandReply } from '../../services/proposal-commands.js';
 import { maybeSpeakReply } from '../../services/speak-on-reply.js';
@@ -208,8 +209,33 @@ export class WhatsAppChannel implements Channel {
           pushName: msg.pushName,
         });
 
-        const text = msg.message.conversation ||
+        // Phase 2.3 — voice note ingestion. If WhatsApp delivered an
+        // audioMessage / pttMessage, download it via Baileys, run
+        // whisper.cpp on the bytes, use the transcript as the message
+        // text. Best-effort: when whisper isn't installed or returns
+        // nothing, we fall through with a `[voice note]` placeholder.
+        let text = msg.message.conversation ||
           msg.message.extendedTextMessage?.text || '';
+        let voiceTranscriptUsed = false;
+        const audio = (msg.message as any).audioMessage || (msg.message as any).pttMessage;
+        if (audio && !text) {
+          try {
+            const { downloadMediaMessage } = baileys as any;
+            const buffer = await downloadMediaMessage(msg, 'buffer', {}) as Buffer;
+            const result = await transcribe(buffer, audio.mimetype ?? 'audio/ogg', { root: this.root });
+            if (result) {
+              text = result.text;
+              voiceTranscriptUsed = true;
+              logger.info('WhatsApp voice note transcribed', { chars: result.text.length, cached: result.cached });
+            } else {
+              text = '[voice note — transcription unavailable]';
+              logger.warn('WhatsApp voice note arrived but whisper produced no transcript');
+            }
+          } catch (err) {
+            logger.warn('Voice ingestion failed; falling back to placeholder', { error: String(err) });
+            text = '[voice note — could not download]';
+          }
+        }
 
         if (!text) return;
 
@@ -241,6 +267,7 @@ export class WhatsAppChannel implements Channel {
           metadata: {
             remoteJid: msg.key.remoteJid,
             pushName: msg.pushName,
+            ...(voiceTranscriptUsed ? { fromVoice: true } : {}),
           },
         };
 
