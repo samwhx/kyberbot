@@ -191,42 +191,16 @@ class WarmSession {
       if (s) logger.debug('warm session stderr', { key: this.key, line: s.slice(0, 300) });
     });
 
-    // First `init` event signals process is ready to accept turns.
-    this.initPromise = this.waitForInit();
-  }
-
-  /**
-   * Resolves on the first `system/init` event from stdout. Failure to
-   * receive init within 30s rejects.
-   */
-  private waitForInit(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new WarmTurnError('warm session init timeout', true));
-      }, 30_000);
-
-      const onData = (data: Buffer) => {
-        const text = data.toString();
-        if (text.includes('"type":"system"') && text.includes('"subtype":"init"')) {
-          cleanup();
-          this.state = 'READY';
-          resolve();
-        }
-      };
-      const onExit = () => {
-        cleanup();
-        reject(new WarmTurnError('warm session exited before init', true));
-      };
-      const cleanup = () => {
-        clearTimeout(timeout);
-        this.proc.stdout.removeListener('data', onData);
-        this.proc.removeListener('exit', onExit);
-      };
-
-      this.proc.stdout.on('data', onData);
-      this.proc.once('exit', onExit);
-    });
+    // Claude Code ≥ 2.x only emits the `system/init` event AFTER it
+    // receives the first user message on stdin. Older versions emitted
+    // it on spawn. Waiting-for-init before sending a turn deadlocks on
+    // current claude builds, so we treat the session as READY the
+    // moment the process is spawned. Early-exit detection still kicks
+    // in via the constructor's `exit` listener (sets state=DEAD).
+    // The init event still arrives mid-turn; runOneTurn ignores
+    // anything that isn't `assistant` or `result`, so this is safe.
+    this.state = 'READY';
+    this.initPromise = Promise.resolve();
   }
 
   /** Resolves once the process is initialized and ready for turns. */
