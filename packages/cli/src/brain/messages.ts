@@ -11,6 +11,7 @@ import { join } from 'path';
 import { mkdirSync } from 'fs';
 import { createLogger } from '../logger.js';
 import { openWithRecovery } from './db-recovery.js';
+import { applyMigrations, addColumnIfMissing, type Migration } from './db-migrate.js';
 
 const logger = createLogger('messages');
 
@@ -46,70 +47,75 @@ function ensureDatabase(root: string): Database.Database {
   const newDb = openWithRecovery(newDbPath);
   newDb.pragma('journal_mode = WAL');
 
-  newDb.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      channel TEXT NOT NULL DEFAULT 'web',
-      title TEXT,
-      claude_session_id TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL REFERENCES sessions(id),
-      role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
-      content TEXT NOT NULL,
-      tool_calls_json TEXT,
-      memory_updates_json TEXT,
-      usage_json TEXT,
-      cost_usd REAL,
-      created_at TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-    CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
-  `);
-
-  // Migration: add claude_session_id column if not present
-  const cols = newDb.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
-  const colNames = new Set(cols.map(c => c.name));
-  if (!colNames.has('claude_session_id')) {
-    newDb.exec(`ALTER TABLE sessions ADD COLUMN claude_session_id TEXT`);
-  }
-
-  // ── ARP unification (Phase A) — agent-resource metadata ─────────────
-  // Schema vocabulary defined in @kybernesis/arp-spec :: AgentResourceMetadata.
-  // Sessions are the natural tagging level for messages — every message
-  // within a session shares the same context (peer, project, connection).
-  // Set these once at session creation; the messages_for_session helpers
-  // can JOIN through session_id when an ARP endpoint needs to filter by
-  // them. ARP-originated sessions get connection_id + source_did stamped
-  // by the cloud-bridge adapter; project_id / tags / classification get
-  // populated when the user (or the LLM) declares context.
-  if (!colNames.has('project_id')) {
-    newDb.exec(`ALTER TABLE sessions ADD COLUMN project_id TEXT`);
-    newDb.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)`);
-  }
-  if (!colNames.has('tags_json')) {
-    newDb.exec(`ALTER TABLE sessions ADD COLUMN tags_json TEXT DEFAULT '[]'`);
-  }
-  if (!colNames.has('classification')) {
-    newDb.exec(`ALTER TABLE sessions ADD COLUMN classification TEXT`);
-  }
-  if (!colNames.has('connection_id')) {
-    newDb.exec(`ALTER TABLE sessions ADD COLUMN connection_id TEXT`);
-    newDb.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_connection ON sessions(connection_id)`);
-  }
-  if (!colNames.has('source_did')) {
-    newDb.exec(`ALTER TABLE sessions ADD COLUMN source_did TEXT`);
-  }
+  applyMigrations(newDb, 'messages', MESSAGES_MIGRATIONS);
 
   databases.set(root, newDb);
   logger.info('Messages database initialized', { path: newDbPath });
   return newDb;
 }
+
+/**
+ * Force-initialize the messages DB (runs pending migrations) and return
+ * the underlying connection. Mostly for the `kyberbot agent migrate`
+ * command and tests; regular code paths go through the higher-level
+ * helpers (`createSession`, `saveMessage`, etc.) which call ensureDatabase
+ * themselves.
+ */
+export function getMessagesDb(root: string): Database.Database {
+  return ensureDatabase(root);
+}
+
+const MESSAGES_MIGRATIONS: Migration[] = [
+  {
+    version: 1,
+    description: 'base schema — sessions + messages',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          id TEXT PRIMARY KEY,
+          channel TEXT NOT NULL DEFAULT 'web',
+          title TEXT,
+          claude_session_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES sessions(id),
+          role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+          content TEXT NOT NULL,
+          tool_calls_json TEXT,
+          memory_updates_json TEXT,
+          usage_json TEXT,
+          cost_usd REAL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
+      `);
+      // claude_session_id was added to fresh schemas later but is also part
+      // of v1 for back-compat with the pre-framework codepath.
+      addColumnIfMissing(db, 'sessions', 'claude_session_id', 'TEXT');
+    },
+  },
+  {
+    version: 2,
+    description: 'ARP unification — session project_id, tags_json, classification, connection_id, source_did',
+    up: (db) => {
+      addColumnIfMissing(db, 'sessions', 'project_id', 'TEXT');
+      addColumnIfMissing(db, 'sessions', 'tags_json', "TEXT DEFAULT '[]'");
+      addColumnIfMissing(db, 'sessions', 'classification', 'TEXT');
+      addColumnIfMissing(db, 'sessions', 'connection_id', 'TEXT');
+      addColumnIfMissing(db, 'sessions', 'source_did', 'TEXT');
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_connection ON sessions(connection_id);
+      `);
+    },
+  },
+];
 
 export interface StoredMessage {
   id: number;
@@ -200,6 +206,27 @@ export function getSessionMessages(root: string, sessionId: string): StoredMessa
   return database.prepare(
     `SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC`
   ).all(sessionId) as StoredMessage[];
+}
+
+/**
+ * Return messages for a session that are newer than `sinceMs` epoch ms.
+ * Used by conversation-history to rehydrate the in-memory rolling buffer
+ * on agent restart so channel conversations survive across reboots.
+ *
+ * Returns oldest → newest, ready to push into the in-memory map in order.
+ */
+export function getRecentMessagesForSession(
+  root: string,
+  sessionId: string,
+  sinceMs: number,
+): StoredMessage[] {
+  const database = ensureDatabase(root);
+  const sinceIso = new Date(sinceMs).toISOString();
+  return database.prepare(
+    `SELECT * FROM messages
+     WHERE session_id = ? AND created_at >= ?
+     ORDER BY created_at ASC`,
+  ).all(sessionId, sinceIso) as StoredMessage[];
 }
 
 /**

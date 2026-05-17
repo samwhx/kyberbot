@@ -12,6 +12,7 @@
 
 import Database from 'libsql';
 import { openWithRecovery } from './db-recovery.js';
+import { applyMigrations, addColumnIfMissing, type Migration } from './db-migrate.js';
 import { join } from 'path';
 import { mkdir } from 'fs/promises';
 import { createLogger } from '../logger.js';
@@ -118,181 +119,182 @@ async function ensureDatabase(root: string): Promise<Database.Database> {
 
   newDb.pragma('journal_mode = WAL');
 
-  newDb.exec(`
-    CREATE TABLE IF NOT EXISTS entities (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      normalized_name TEXT NOT NULL,
-      aliases TEXT DEFAULT '[]',
-      type TEXT NOT NULL CHECK(type IN ('person', 'company', 'project', 'place', 'topic')),
-      first_seen TEXT NOT NULL,
-      last_seen TEXT NOT NULL,
-      mention_count INTEGER DEFAULT 1,
-      UNIQUE(normalized_name, type)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_entities_normalized ON entities(normalized_name);
-    CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
-
-    CREATE TABLE IF NOT EXISTS entity_mentions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      entity_id INTEGER NOT NULL,
-      conversation_id TEXT NOT NULL,
-      source_path TEXT NOT NULL,
-      context TEXT,
-      timestamp TEXT NOT NULL,
-      FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_mentions_conversation ON entity_mentions(conversation_id);
-    CREATE INDEX IF NOT EXISTS idx_mentions_entity ON entity_mentions(entity_id);
-    CREATE INDEX IF NOT EXISTS idx_mentions_timestamp ON entity_mentions(timestamp);
-
-    CREATE TABLE IF NOT EXISTS entity_relations (
-      source_id INTEGER NOT NULL,
-      target_id INTEGER NOT NULL,
-      relationship TEXT DEFAULT 'co-occurred',
-      strength INTEGER DEFAULT 1,
-      PRIMARY KEY (source_id, target_id),
-      FOREIGN KEY (source_id) REFERENCES entities(id) ON DELETE CASCADE,
-      FOREIGN KEY (target_id) REFERENCES entities(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_relations_source ON entity_relations(source_id);
-    CREATE INDEX IF NOT EXISTS idx_relations_target ON entity_relations(target_id);
-  `);
-
-  runEntityMigrations(newDb);
+  applyMigrations(newDb, 'entity-graph', ENTITY_GRAPH_MIGRATIONS);
 
   databases.set(root, newDb);
   logger.info('Entity graph database initialized', { path: newDbPath });
   return newDb;
 }
 
-function runEntityMigrations(database: Database.Database): void {
-  const entityCols = database.prepare(`PRAGMA table_info(entities)`).all() as Array<{ name: string }>;
-  const entityColNames = new Set(entityCols.map(c => c.name));
+const ENTITY_GRAPH_MIGRATIONS: Migration[] = [
+  {
+    version: 1,
+    description: 'base schema — entities, entity_mentions, entity_relations',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS entities (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          normalized_name TEXT NOT NULL,
+          aliases TEXT DEFAULT '[]',
+          type TEXT NOT NULL CHECK(type IN ('person', 'company', 'project', 'place', 'topic')),
+          first_seen TEXT NOT NULL,
+          last_seen TEXT NOT NULL,
+          mention_count INTEGER DEFAULT 1,
+          UNIQUE(normalized_name, type)
+        );
 
-  if (!entityColNames.has('priority')) {
-    database.exec(`ALTER TABLE entities ADD COLUMN priority REAL DEFAULT 0.5`);
-  }
-  if (!entityColNames.has('decay_score')) {
-    database.exec(`ALTER TABLE entities ADD COLUMN decay_score REAL DEFAULT 0.0`);
-  }
-  if (!entityColNames.has('tier')) {
-    database.exec(`ALTER TABLE entities ADD COLUMN tier TEXT DEFAULT 'warm'`);
-  }
-  if (!entityColNames.has('last_accessed')) {
-    database.exec(`ALTER TABLE entities ADD COLUMN last_accessed TEXT`);
-  }
-  if (!entityColNames.has('access_count')) {
-    database.exec(`ALTER TABLE entities ADD COLUMN access_count INTEGER DEFAULT 0`);
-  }
-  if (!entityColNames.has('is_pinned')) {
-    database.exec(`ALTER TABLE entities ADD COLUMN is_pinned INTEGER DEFAULT 0`);
-  }
-  if (!entityColNames.has('last_reasoned_at')) {
-    database.exec(`ALTER TABLE entities ADD COLUMN last_reasoned_at TEXT`);
-  }
+        CREATE INDEX IF NOT EXISTS idx_entities_normalized ON entities(normalized_name);
+        CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
 
-  // Mention-level source tracking
-  const mentionCols = database.prepare(`PRAGMA table_info(entity_mentions)`).all() as Array<{ name: string }>;
-  const mentionColNames = new Set(mentionCols.map(c => c.name));
+        CREATE TABLE IF NOT EXISTS entity_mentions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          entity_id INTEGER NOT NULL,
+          conversation_id TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          context TEXT,
+          timestamp TEXT NOT NULL,
+          FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
+        );
 
-  if (!mentionColNames.has('source_type')) {
-    database.exec(`ALTER TABLE entity_mentions ADD COLUMN source_type TEXT DEFAULT 'chat'`);
-  }
-  if (!mentionColNames.has('confidence')) {
-    database.exec(`ALTER TABLE entity_mentions ADD COLUMN confidence REAL DEFAULT 0.85`);
-  }
+        CREATE INDEX IF NOT EXISTS idx_mentions_conversation ON entity_mentions(conversation_id);
+        CREATE INDEX IF NOT EXISTS idx_mentions_entity ON entity_mentions(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_mentions_timestamp ON entity_mentions(timestamp);
 
-  const relCols = database.prepare(`PRAGMA table_info(entity_relations)`).all() as Array<{ name: string }>;
-  const relColNames = new Set(relCols.map(c => c.name));
+        CREATE TABLE IF NOT EXISTS entity_relations (
+          source_id INTEGER NOT NULL,
+          target_id INTEGER NOT NULL,
+          relationship TEXT DEFAULT 'co-occurred',
+          strength INTEGER DEFAULT 1,
+          PRIMARY KEY (source_id, target_id),
+          FOREIGN KEY (source_id) REFERENCES entities(id) ON DELETE CASCADE,
+          FOREIGN KEY (target_id) REFERENCES entities(id) ON DELETE CASCADE
+        );
 
-  if (!relColNames.has('confidence')) {
-    database.exec(`ALTER TABLE entity_relations ADD COLUMN confidence REAL DEFAULT 0.5`);
-  }
-  if (!relColNames.has('method')) {
-    database.exec(`ALTER TABLE entity_relations ADD COLUMN method TEXT DEFAULT 'co-occurred'`);
-  }
-  if (!relColNames.has('rationale')) {
-    database.exec(`ALTER TABLE entity_relations ADD COLUMN rationale TEXT`);
-  }
-  if (!relColNames.has('last_verified')) {
-    database.exec(`ALTER TABLE entity_relations ADD COLUMN last_verified TEXT`);
-  }
-
-  database.exec(`
-    CREATE INDEX IF NOT EXISTS idx_entities_tier ON entities(tier);
-    CREATE INDEX IF NOT EXISTS idx_entities_priority ON entities(priority DESC);
-    CREATE INDEX IF NOT EXISTS idx_relations_confidence ON entity_relations(confidence DESC);
-  `);
-
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS entity_merges (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      keep_id INTEGER NOT NULL,
-      remove_id INTEGER NOT NULL,
-      keep_name TEXT,
-      remove_name TEXT,
-      keep_type TEXT,
-      remove_type TEXT,
-      reason TEXT NOT NULL,
-      confidence REAL,
-      ai_rationale TEXT,
-      mentions_moved INTEGER DEFAULT 0,
-      relations_moved INTEGER DEFAULT 0,
-      merged_at TEXT DEFAULT (datetime('now')),
-      merged_by TEXT DEFAULT 'sleep:entity-hygiene'
-    );
-  `);
-
-  // Per-entity narrative profiles (generated by sleep agent)
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS entity_profiles (
-      entity_id INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
-      profile TEXT NOT NULL,
-      generated_at TEXT DEFAULT (datetime('now')),
-      fact_count INTEGER DEFAULT 0
-    );
-  `);
-
-  // Contradiction tracking for close-confidence fact conflicts
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS contradictions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      entity_id INTEGER,
-      fact_a_id INTEGER,
-      fact_b_id INTEGER,
-      fact_a TEXT,
-      fact_b TEXT,
-      description TEXT,
-      status TEXT DEFAULT 'open',
-      resolved_by TEXT,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_contradictions_entity ON contradictions(entity_id);
-    CREATE INDEX IF NOT EXISTS idx_contradictions_status ON contradictions(status);
-  `);
-
-  // Entity insights from reasoning engine (deduction + induction)
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS entity_insights (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-      insight_type TEXT NOT NULL,
-      insight TEXT NOT NULL,
-      reasoning TEXT NOT NULL,
-      confidence REAL DEFAULT 0.70,
-      source_entity_ids TEXT DEFAULT '[]',
-      created_at TEXT DEFAULT (datetime('now')),
-      expires_at TEXT,
-      is_stale INTEGER DEFAULT 0
-    );
-    CREATE INDEX IF NOT EXISTS idx_insights_entity ON entity_insights(entity_id);
-    CREATE INDEX IF NOT EXISTS idx_insights_type ON entity_insights(insight_type);
-  `);
-}
+        CREATE INDEX IF NOT EXISTS idx_relations_source ON entity_relations(source_id);
+        CREATE INDEX IF NOT EXISTS idx_relations_target ON entity_relations(target_id);
+      `);
+    },
+  },
+  {
+    version: 2,
+    description: 'entity decay/tier/access tracking columns',
+    up: (db) => {
+      addColumnIfMissing(db, 'entities', 'priority', 'REAL DEFAULT 0.5');
+      addColumnIfMissing(db, 'entities', 'decay_score', 'REAL DEFAULT 0.0');
+      addColumnIfMissing(db, 'entities', 'tier', "TEXT DEFAULT 'warm'");
+      addColumnIfMissing(db, 'entities', 'last_accessed', 'TEXT');
+      addColumnIfMissing(db, 'entities', 'access_count', 'INTEGER DEFAULT 0');
+      addColumnIfMissing(db, 'entities', 'is_pinned', 'INTEGER DEFAULT 0');
+      addColumnIfMissing(db, 'entities', 'last_reasoned_at', 'TEXT');
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_entities_tier ON entities(tier);
+        CREATE INDEX IF NOT EXISTS idx_entities_priority ON entities(priority DESC);
+      `);
+    },
+  },
+  {
+    version: 3,
+    description: 'mention source_type + confidence',
+    up: (db) => {
+      addColumnIfMissing(db, 'entity_mentions', 'source_type', "TEXT DEFAULT 'chat'");
+      addColumnIfMissing(db, 'entity_mentions', 'confidence', 'REAL DEFAULT 0.85');
+    },
+  },
+  {
+    version: 4,
+    description: 'relation confidence/method/rationale + verification',
+    up: (db) => {
+      addColumnIfMissing(db, 'entity_relations', 'confidence', 'REAL DEFAULT 0.5');
+      addColumnIfMissing(db, 'entity_relations', 'method', "TEXT DEFAULT 'co-occurred'");
+      addColumnIfMissing(db, 'entity_relations', 'rationale', 'TEXT');
+      addColumnIfMissing(db, 'entity_relations', 'last_verified', 'TEXT');
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_relations_confidence ON entity_relations(confidence DESC);`);
+    },
+  },
+  {
+    version: 5,
+    description: 'entity_merges audit table',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS entity_merges (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          keep_id INTEGER NOT NULL,
+          remove_id INTEGER NOT NULL,
+          keep_name TEXT,
+          remove_name TEXT,
+          keep_type TEXT,
+          remove_type TEXT,
+          reason TEXT NOT NULL,
+          confidence REAL,
+          ai_rationale TEXT,
+          mentions_moved INTEGER DEFAULT 0,
+          relations_moved INTEGER DEFAULT 0,
+          merged_at TEXT DEFAULT (datetime('now')),
+          merged_by TEXT DEFAULT 'sleep:entity-hygiene'
+        );
+      `);
+    },
+  },
+  {
+    version: 6,
+    description: 'entity_profiles narrative cache',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS entity_profiles (
+          entity_id INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+          profile TEXT NOT NULL,
+          generated_at TEXT DEFAULT (datetime('now')),
+          fact_count INTEGER DEFAULT 0
+        );
+      `);
+    },
+  },
+  {
+    version: 7,
+    description: 'contradictions table',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS contradictions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          entity_id INTEGER,
+          fact_a_id INTEGER,
+          fact_b_id INTEGER,
+          fact_a TEXT,
+          fact_b TEXT,
+          description TEXT,
+          status TEXT DEFAULT 'open',
+          resolved_by TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_contradictions_entity ON contradictions(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_contradictions_status ON contradictions(status);
+      `);
+    },
+  },
+  {
+    version: 8,
+    description: 'entity_insights from reasoning engine',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS entity_insights (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+          insight_type TEXT NOT NULL,
+          insight TEXT NOT NULL,
+          reasoning TEXT NOT NULL,
+          confidence REAL DEFAULT 0.70,
+          source_entity_ids TEXT DEFAULT '[]',
+          created_at TEXT DEFAULT (datetime('now')),
+          expires_at TEXT,
+          is_stale INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_insights_entity ON entity_insights(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_insights_type ON entity_insights(insight_type);
+      `);
+    },
+  },
+];
 
 export async function getEntityGraphDb(root: string): Promise<Database.Database> {
   return ensureDatabase(root);

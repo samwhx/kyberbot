@@ -9,6 +9,7 @@
 
 import Database from 'libsql';
 import { openWithRecovery } from './db-recovery.js';
+import { applyMigrations, addColumnIfMissing, type Migration } from './db-migrate.js';
 import { join } from 'path';
 import { mkdir } from 'fs/promises';
 import { createLogger } from '../logger.js';
@@ -132,51 +133,7 @@ async function ensureDatabase(root: string): Promise<Database.Database> {
 
   newDb.pragma('journal_mode = WAL');
 
-  newDb.exec(`
-    CREATE TABLE IF NOT EXISTS timeline_events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      type TEXT NOT NULL CHECK(type IN ('conversation', 'idea', 'file', 'transcript', 'note', 'intake')),
-      timestamp TEXT NOT NULL,
-      end_timestamp TEXT,
-      title TEXT NOT NULL,
-      summary TEXT,
-      source_path TEXT NOT NULL UNIQUE,
-      entities_json TEXT DEFAULT '[]',
-      topics_json TEXT DEFAULT '[]'
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_timeline_timestamp ON timeline_events(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_timeline_type ON timeline_events(type);
-    CREATE INDEX IF NOT EXISTS idx_timeline_source ON timeline_events(source_path);
-
-    CREATE VIRTUAL TABLE IF NOT EXISTS timeline_fts USING fts5(
-      title,
-      summary,
-      entities,
-      topics,
-      content=''
-    );
-
-    CREATE TRIGGER IF NOT EXISTS timeline_ai AFTER INSERT ON timeline_events BEGIN
-      INSERT INTO timeline_fts(rowid, title, summary, entities, topics)
-      VALUES (new.id, new.title, new.summary, new.entities_json, new.topics_json);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS timeline_ad AFTER DELETE ON timeline_events BEGIN
-      INSERT INTO timeline_fts(timeline_fts, rowid, title, summary, entities, topics)
-      VALUES ('delete', old.id, old.title, old.summary, old.entities_json, old.topics_json);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS timeline_au AFTER UPDATE ON timeline_events BEGIN
-      INSERT INTO timeline_fts(timeline_fts, rowid, title, summary, entities, topics)
-      VALUES ('delete', old.id, old.title, old.summary, old.entities_json, old.topics_json);
-      INSERT INTO timeline_fts(rowid, title, summary, entities, topics)
-      VALUES (new.id, new.title, new.summary, new.entities_json, new.topics_json);
-    END;
-  `);
-
-  rebuildBrokenTimelineFts(newDb);
-  runMigrations(newDb);
+  applyMigrations(newDb, 'timeline', TIMELINE_MIGRATIONS);
 
   databases.set(root, newDb);
   logger.info('Timeline database initialized', { path: newDbPath });
@@ -184,13 +141,13 @@ async function ensureDatabase(root: string): Promise<Database.Database> {
 }
 
 /**
- * Early builds declared timeline_fts with `content=timeline_events` but FTS
- * column names (`entities`, `topics`) didn't match base-table columns
- * (`entities_json`, `topics_json`), leaving FTS unqueryable. Detect the
- * broken shape, drop it, and repopulate a contentless FTS from the rows we
- * already have.
+ * Detect the legacy buggy timeline_fts shape (`content=timeline_events`
+ * with mismatched FTS column names) and rebuild a contentless FTS from
+ * existing rows. Safe to call repeatedly — only does work when broken.
+ * Called from migration v1 so first-boot of a fresh DB skips the rebuild
+ * naturally (the freshly-created FTS works).
  */
-function rebuildBrokenTimelineFts(database: Database.Database): void {
+function rebuildBrokenTimelineFtsIfNeeded(database: Database.Database): void {
   let needsRebuild = false;
   try {
     database.prepare('SELECT count(*) as c FROM timeline_fts').get();
@@ -219,90 +176,103 @@ function rebuildBrokenTimelineFts(database: Database.Database): void {
   logger.info(`Repopulated timeline_fts with ${rows.length} rows`);
 }
 
-function runMigrations(database: Database.Database): void {
-  const columns = database.prepare(`PRAGMA table_info(timeline_events)`).all() as Array<{ name: string }>;
-  const columnNames = new Set(columns.map(c => c.name));
+const TIMELINE_MIGRATIONS: Migration[] = [
+  {
+    version: 1,
+    description: 'base schema — timeline_events, FTS5 index, triggers',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS timeline_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          type TEXT NOT NULL CHECK(type IN ('conversation', 'idea', 'file', 'transcript', 'note', 'intake')),
+          timestamp TEXT NOT NULL,
+          end_timestamp TEXT,
+          title TEXT NOT NULL,
+          summary TEXT,
+          source_path TEXT NOT NULL UNIQUE,
+          entities_json TEXT DEFAULT '[]',
+          topics_json TEXT DEFAULT '[]'
+        );
 
-  if (!columnNames.has('priority')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN priority REAL DEFAULT 0.5`);
-  }
-  if (!columnNames.has('decay_score')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN decay_score REAL DEFAULT 0.0`);
-  }
-  if (!columnNames.has('tier')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN tier TEXT DEFAULT 'warm'`);
-  }
-  if (!columnNames.has('tags_json')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN tags_json TEXT DEFAULT '[]'`);
-  }
-  if (!columnNames.has('last_enriched')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN last_enriched TEXT`);
-  }
-  if (!columnNames.has('access_count')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN access_count INTEGER DEFAULT 0`);
-  }
-  if (!columnNames.has('is_pinned')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN is_pinned INTEGER DEFAULT 0`);
-  }
-  if (!columnNames.has('last_accessed')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN last_accessed TEXT`);
-  }
+        CREATE INDEX IF NOT EXISTS idx_timeline_timestamp ON timeline_events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_timeline_type ON timeline_events(type);
+        CREATE INDEX IF NOT EXISTS idx_timeline_source ON timeline_events(source_path);
 
-  // ── ARP unification (Phase A) — agent-resource metadata ─────────────
-  // Schema vocabulary defined in @kybernesis/arp-spec :: AgentResourceMetadata.
-  // tags_json already exists above and is reused as the canonical
-  // ARP `tags` column. project_id / classification / connection_id /
-  // source_did added here so timeline events stamped during an ARP
-  // conversation are filterable by the same dimensions facts already
-  // are.
-  if (!columnNames.has('project_id')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN project_id TEXT`);
-    database.exec(`CREATE INDEX IF NOT EXISTS idx_timeline_project ON timeline_events(project_id)`);
-  }
-  if (!columnNames.has('classification')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN classification TEXT`);
-    database.exec(`CREATE INDEX IF NOT EXISTS idx_timeline_classification ON timeline_events(classification)`);
-  }
-  if (!columnNames.has('connection_id')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN connection_id TEXT`);
-    database.exec(`CREATE INDEX IF NOT EXISTS idx_timeline_connection ON timeline_events(connection_id)`);
-  }
-  if (!columnNames.has('source_did')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN source_did TEXT`);
-  }
+        CREATE VIRTUAL TABLE IF NOT EXISTS timeline_fts USING fts5(
+          title,
+          summary,
+          entities,
+          topics,
+          content=''
+        );
 
-  // ── Self-learning telemetry + outcome annotations (Tier 1) ──────────
-  // metrics_json: per-reply telemetry (latency, tokens, tools used,
-  //   cost, model). Populated by store-conversation when the channel
-  //   handler supplies it. JSON shape is documented in
-  //   docs/self-learning-plan.md §3.2.
-  // outcome / outcome_confidence / outcome_evidence / outcome_annotated_at:
-  //   set by the outcome-annotator sleep step when a follow-up message
-  //   classifies the reply (thanks/correction/reask/ignored/neutral).
-  //   Used by the self-review heartbeat task to draft proposals.
-  if (!columnNames.has('metrics_json')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN metrics_json TEXT`);
-  }
-  if (!columnNames.has('outcome')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN outcome TEXT`);
-    database.exec(`CREATE INDEX IF NOT EXISTS idx_timeline_outcome ON timeline_events(outcome)`);
-  }
-  if (!columnNames.has('outcome_confidence')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN outcome_confidence REAL`);
-  }
-  if (!columnNames.has('outcome_evidence')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN outcome_evidence TEXT`);
-  }
-  if (!columnNames.has('outcome_annotated_at')) {
-    database.exec(`ALTER TABLE timeline_events ADD COLUMN outcome_annotated_at TEXT`);
-  }
+        CREATE TRIGGER IF NOT EXISTS timeline_ai AFTER INSERT ON timeline_events BEGIN
+          INSERT INTO timeline_fts(rowid, title, summary, entities, topics)
+          VALUES (new.id, new.title, new.summary, new.entities_json, new.topics_json);
+        END;
 
-  database.exec(`
-    CREATE INDEX IF NOT EXISTS idx_timeline_tier ON timeline_events(tier);
-    CREATE INDEX IF NOT EXISTS idx_timeline_priority ON timeline_events(priority DESC);
-    CREATE INDEX IF NOT EXISTS idx_timeline_last_enriched ON timeline_events(last_enriched);
-  `);
-}
+        CREATE TRIGGER IF NOT EXISTS timeline_ad AFTER DELETE ON timeline_events BEGIN
+          INSERT INTO timeline_fts(timeline_fts, rowid, title, summary, entities, topics)
+          VALUES ('delete', old.id, old.title, old.summary, old.entities_json, old.topics_json);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS timeline_au AFTER UPDATE ON timeline_events BEGIN
+          INSERT INTO timeline_fts(timeline_fts, rowid, title, summary, entities, topics)
+          VALUES ('delete', old.id, old.title, old.summary, old.entities_json, old.topics_json);
+          INSERT INTO timeline_fts(rowid, title, summary, entities, topics)
+          VALUES (new.id, new.title, new.summary, new.entities_json, new.topics_json);
+        END;
+      `);
+      rebuildBrokenTimelineFtsIfNeeded(db);
+    },
+  },
+  {
+    version: 2,
+    description: 'tier/priority/decay + tags/last_enriched/access tracking',
+    up: (db) => {
+      addColumnIfMissing(db, 'timeline_events', 'priority', 'REAL DEFAULT 0.5');
+      addColumnIfMissing(db, 'timeline_events', 'decay_score', 'REAL DEFAULT 0.0');
+      addColumnIfMissing(db, 'timeline_events', 'tier', "TEXT DEFAULT 'warm'");
+      addColumnIfMissing(db, 'timeline_events', 'tags_json', "TEXT DEFAULT '[]'");
+      addColumnIfMissing(db, 'timeline_events', 'last_enriched', 'TEXT');
+      addColumnIfMissing(db, 'timeline_events', 'access_count', 'INTEGER DEFAULT 0');
+      addColumnIfMissing(db, 'timeline_events', 'is_pinned', 'INTEGER DEFAULT 0');
+      addColumnIfMissing(db, 'timeline_events', 'last_accessed', 'TEXT');
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_timeline_tier ON timeline_events(tier);
+        CREATE INDEX IF NOT EXISTS idx_timeline_priority ON timeline_events(priority DESC);
+        CREATE INDEX IF NOT EXISTS idx_timeline_last_enriched ON timeline_events(last_enriched);
+      `);
+    },
+  },
+  {
+    version: 3,
+    description: 'ARP unification — project_id, classification, connection_id, source_did',
+    up: (db) => {
+      addColumnIfMissing(db, 'timeline_events', 'project_id', 'TEXT');
+      addColumnIfMissing(db, 'timeline_events', 'classification', 'TEXT');
+      addColumnIfMissing(db, 'timeline_events', 'connection_id', 'TEXT');
+      addColumnIfMissing(db, 'timeline_events', 'source_did', 'TEXT');
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_timeline_project ON timeline_events(project_id);
+        CREATE INDEX IF NOT EXISTS idx_timeline_classification ON timeline_events(classification);
+        CREATE INDEX IF NOT EXISTS idx_timeline_connection ON timeline_events(connection_id);
+      `);
+    },
+  },
+  {
+    version: 4,
+    description: 'self-learning — metrics_json + outcome annotation columns',
+    up: (db) => {
+      addColumnIfMissing(db, 'timeline_events', 'metrics_json', 'TEXT');
+      addColumnIfMissing(db, 'timeline_events', 'outcome', 'TEXT');
+      addColumnIfMissing(db, 'timeline_events', 'outcome_confidence', 'REAL');
+      addColumnIfMissing(db, 'timeline_events', 'outcome_evidence', 'TEXT');
+      addColumnIfMissing(db, 'timeline_events', 'outcome_annotated_at', 'TEXT');
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_timeline_outcome ON timeline_events(outcome);`);
+    },
+  },
+];
 
 export async function getTimelineDb(root: string): Promise<Database.Database> {
   return ensureDatabase(root);
