@@ -83,6 +83,9 @@ describe('WhatsAppChannel', () => {
     mockComplete.mockReset();
     mockSendMessage.mockReset();
     mockEnd.mockReset();
+    // Tests stub the non-warm prompt builders. Force warm pool off so
+    // the assertions match the code path being exercised.
+    process.env.KYBERBOT_WARM_POOL = '0';
   });
 
   describe('name', () => {

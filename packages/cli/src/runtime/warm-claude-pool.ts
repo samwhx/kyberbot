@@ -601,10 +601,23 @@ export async function shutdownWarmPool(): Promise<void> {
   }
 }
 
-/** True if the pool is enabled via env or config. */
+/**
+ * Decide whether the warm Claude subprocess pool should be active for
+ * this run. Resolution order:
+ *
+ *   1. KYBERBOT_WARM_POOL env var (1/true → on, 0/false → off) wins
+ *   2. identity.yaml `claude.warm_pool: false` opts the agent out
+ *   3. otherwise: **default ON** — channel replies stay snappy at the
+ *      cost of one idle Claude subprocess per active conversation
+ *      (recycled every 4h / 50 turns; see WarmSession.isStale)
+ *
+ * Set `claude.warm_pool: false` in identity.yaml or `KYBERBOT_WARM_POOL=0`
+ * in .env to disable on a memory-constrained host.
+ */
 export function isWarmPoolEnabled(identityWarmPool?: boolean): boolean {
   const env = process.env.KYBERBOT_WARM_POOL;
   if (env === '1' || env === 'true') return true;
   if (env === '0' || env === 'false') return false;
-  return !!identityWarmPool;
+  if (identityWarmPool === false) return false;
+  return true;
 }

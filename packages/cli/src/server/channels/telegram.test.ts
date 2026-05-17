@@ -97,9 +97,12 @@ const { TelegramChannel } = await import('./telegram.js');
 describe('TelegramChannel', () => {
   let channel: InstanceType<typeof TelegramChannel>;
 
+  // These tests stub buildPromptWithHistory (non-warm path). Force warm
+  // pool off so the assertions still fire after the default flipped on.
   beforeEach(() => {
     vi.clearAllMocks();
     mockComplete.mockResolvedValue('Mock response');
+    process.env.KYBERBOT_WARM_POOL = '0';
   });
 
   describe('constructor', () => {

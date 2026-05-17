@@ -36,16 +36,30 @@ describe('isWarmPoolEnabled', () => {
     expect(isWarmPoolEnabled()).toBe(true);
   });
 
-  it('respects KYBERBOT_WARM_POOL=0 (overrides identity)', () => {
+  it('respects KYBERBOT_WARM_POOL=0 (overrides identity even when on)', () => {
     process.env.KYBERBOT_WARM_POOL = '0';
     expect(isWarmPoolEnabled(true)).toBe(false);
   });
 
-  it('falls back to identity setting when env unset', () => {
+  it('respects KYBERBOT_WARM_POOL=false (overrides default-on)', () => {
+    process.env.KYBERBOT_WARM_POOL = 'false';
+    expect(isWarmPoolEnabled()).toBe(false);
+  });
+
+  it('defaults ON when nothing is set', () => {
+    delete process.env.KYBERBOT_WARM_POOL;
+    expect(isWarmPoolEnabled()).toBe(true);
+    expect(isWarmPoolEnabled(undefined)).toBe(true);
+  });
+
+  it('identity claude.warm_pool: false opts out', () => {
+    delete process.env.KYBERBOT_WARM_POOL;
+    expect(isWarmPoolEnabled(false)).toBe(false);
+  });
+
+  it('identity claude.warm_pool: true is harmless (already default)', () => {
     delete process.env.KYBERBOT_WARM_POOL;
     expect(isWarmPoolEnabled(true)).toBe(true);
-    expect(isWarmPoolEnabled(false)).toBe(false);
-    expect(isWarmPoolEnabled()).toBe(false);
   });
 });
 
