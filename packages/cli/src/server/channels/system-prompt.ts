@@ -313,6 +313,32 @@ export async function buildPerTurnContextBlock(
     } catch {}
   }
 
+  // Decision-support enrichment (Phase B of focus synthesis). Pulls the
+  // cached focus-synthesis result for this agent. Only ever uses the
+  // cache — never triggers a fresh LLM run from the channel reply path.
+  // The cache is filled by the morning briefing heartbeat and by the
+  // proactive nudge task, so this surface is read-only.
+  try {
+    const { synthesizeFocus } = await import('../../services/focus-synthesis.js');
+    const focus = await synthesizeFocus({ root, cacheOnly: true });
+    if (focus.cached && (focus.topFocus.length > 0 || focus.urgent.length > 0 || focus.valuable.length > 0)) {
+      lines.push('');
+      lines.push('Current focus (decision-support context — use when relevant, do not surface unprompted):');
+      const list = (label: string, items: typeof focus.topFocus) => {
+        if (items.length === 0) return;
+        lines.push(`  ${label}:`);
+        for (const it of items.slice(0, 5)) {
+          lines.push(`  - ${it.title} [${it.urgency}/${it.value}] — ${it.rationale}`);
+        }
+      };
+      list('top', focus.topFocus);
+      list('urgent', focus.urgent);
+      list('valuable now', focus.valuable);
+    }
+  } catch (err) {
+    logger.debug('Focus enrichment skipped', { error: String(err) });
+  }
+
   return lines.join('\n');
 }
 
