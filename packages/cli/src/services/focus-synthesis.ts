@@ -173,13 +173,46 @@ function spawnCli(cmd: string, args: string[], cwd: string, timeoutMs = 30_000):
   });
 }
 
+/**
+ * Extract the JSON payload from a kyberbot subprocess's stdout.
+ * The CLI prepends a dotenv banner ("[dotenv@17.3.1] injecting env …")
+ * to stdout on every boot, which makes a naive JSON.parse(stdout) fail
+ * silently and the caller see an empty result.
+ *
+ * Strategy: scan lines, skip known noise (anything starting with
+ * "[dotenv@" or other recognised prefixes), and parse from the first
+ * line that looks JSON-shaped.
+ */
+function parseJsonOutput<T>(raw: string | null): T | null {
+  if (!raw) return null;
+  const lines = raw.split('\n');
+  let startIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trimStart();
+    if (t === '' || t.startsWith('[dotenv@')) continue;
+    if (t.startsWith('[') || t.startsWith('{')) {
+      startIdx = i;
+      break;
+    }
+  }
+  if (startIdx < 0) return null;
+  try {
+    return JSON.parse(lines.slice(startIdx).join('\n')) as T;
+  } catch {
+    return null;
+  }
+}
+
 async function pullCalendar(root: string): Promise<CalendarSignal[]> {
   try {
     const out = await spawnCli('kyberbot', ['calendar', 'week', '--json'], root);
-    if (!out) return [];
-    const events = JSON.parse(out) as Array<{
+    const events = parseJsonOutput<Array<{
       id: string; summary: string; start: string; end?: string; location?: string; attendees?: string[];
-    }>;
+    }>>(out);
+    if (!events) {
+      logger.debug('Calendar signal returned unparseable output', { headLen: out?.length ?? 0 });
+      return [];
+    }
     return events.slice(0, 30);
   } catch (err) {
     logger.debug('Calendar signal failed', { error: String(err) });
@@ -190,10 +223,13 @@ async function pullCalendar(root: string): Promise<CalendarSignal[]> {
 async function pullMail(root: string): Promise<MailSignal[]> {
   try {
     const out = await spawnCli('kyberbot', ['gmail', 'recent', '--days', '3', '--json'], root);
-    if (!out) return [];
-    const threads = JSON.parse(out) as Array<{
+    const threads = parseJsonOutput<Array<{
       id: string; subject: string; from: string; snippet: string; unread: boolean; timestamp: string;
-    }>;
+    }>>(out);
+    if (!threads) {
+      logger.debug('Mail signal returned unparseable output', { headLen: out?.length ?? 0 });
+      return [];
+    }
     return threads.slice(0, 20).map((t) => ({
       id: t.id,
       subject: t.subject,
