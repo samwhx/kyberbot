@@ -124,6 +124,20 @@ export function createRunCommand(): Command {
           ensureTemplatesUpToDate(root);
         } catch { /* non-fatal */ }
 
+        // Apply any pending SQLite schema migrations before any service
+        // touches a database. Idempotent — does nothing once stores are
+        // at the latest version. Each store's connection bootstrap also
+        // runs migrations on first open; this is the explicit "do it
+        // first, fail loudly if it can't" gate.
+        try {
+          const { applyAllPendingMigrations } = await import('../brain/migrate-all.js');
+          await applyAllPendingMigrations(root);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`Schema migration failed: ${msg}`);
+          throw err;
+        }
+
         // Initialize monitoring (Sentry, process error handlers)
         await initMonitoring();
 
