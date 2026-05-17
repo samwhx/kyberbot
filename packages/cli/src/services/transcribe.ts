@@ -20,10 +20,70 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { createLogger } from '../logger.js';
 
 const logger = createLogger('transcribe');
+
+// Two whisper distros in the wild:
+//   * Homebrew `whisper-cpp` → installs binary at /opt/homebrew/bin/whisper-cli
+//     CLI shape: -m <model.bin> -f <input> -otxt -of <output_prefix>
+//     Requires explicit model path; brew formula does NOT install models.
+//   * pip / pipx `openai-whisper` → installs binary at $PATH/whisper
+//     CLI shape: <input> --model base --output_format txt --output_dir <dir>
+//     Model name only; auto-downloads under ~/.cache/whisper/.
+type WhisperFlavour = 'cpp' | 'python';
+interface DetectedWhisper { bin: string; flavour: WhisperFlavour; }
+
+const KNOWN_BINARIES: Array<{ bin: string; flavour: WhisperFlavour }> = [
+  { bin: 'whisper-cli', flavour: 'cpp' },     // homebrew whisper-cpp formula
+  { bin: 'whisper-cpp', flavour: 'cpp' },     // hypothetical alt naming
+  { bin: 'whisper', flavour: 'python' },      // openai-whisper Python CLI
+];
+
+async function detectWhisper(override?: string): Promise<DetectedWhisper | null> {
+  if (override) {
+    const flavour = override.includes('cli') || override.includes('cpp') ? 'cpp' : 'python';
+    if (await binaryExists(override)) return { bin: override, flavour };
+  }
+  for (const cand of KNOWN_BINARIES) {
+    if (await binaryExists(cand.bin)) return cand;
+  }
+  return null;
+}
+
+function binaryExists(bin: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const proc = spawn(bin, ['--help'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let settled = false;
+    proc.on('error', () => { if (!settled) { settled = true; resolve(false); } });
+    proc.on('close', (code) => { if (!settled) { settled = true; resolve(code === 0); } });
+    setTimeout(() => { if (!settled) { settled = true; try { proc.kill(); } catch {} resolve(false); } }, 5000);
+  });
+}
+
+/**
+ * Resolve the whisper.cpp model file path. Precedence:
+ *   1. KYBERBOT_WHISPER_MODEL env var (absolute path or filename)
+ *   2. options.modelPath
+ *   3. ~/.kyberbot/whisper/ggml-<model>.bin (or ggml-<model>.en.bin if English)
+ *   4. Common brew locations as a last resort
+ */
+function resolveCppModelPath(model: string, override?: string): string | null {
+  const candidates: string[] = [];
+  if (override) candidates.push(override);
+  if (process.env.KYBERBOT_WHISPER_MODEL) candidates.push(process.env.KYBERBOT_WHISPER_MODEL);
+  const base = `${homedir()}/.kyberbot/whisper`;
+  candidates.push(join(base, `ggml-${model}.en.bin`));
+  candidates.push(join(base, `ggml-${model}.bin`));
+  // Some users keep whisper.cpp model files alongside the binary.
+  candidates.push(`/opt/homebrew/share/whisper-cpp/ggml-${model}.en.bin`);
+  candidates.push(`/usr/local/share/whisper-cpp/ggml-${model}.en.bin`);
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
 
 /**
  * Result of a transcription attempt. `null` when whisper is unavailable
@@ -39,10 +99,12 @@ export interface TranscribeResult {
 export interface TranscribeOptions {
   /** Per-agent root so we cache transcripts under data/transcripts/. */
   root: string;
-  /** Override the whisper binary name. Default: `whisper`. */
+  /** Override the whisper binary name. Auto-detected when omitted. */
   binary?: string;
   /** Model size: tiny / base / small / medium / large. Default: base. */
   model?: 'tiny' | 'base' | 'small' | 'medium' | 'large';
+  /** Absolute path to a whisper.cpp .bin model file. Overrides auto-resolution. */
+  modelPath?: string;
   /** Language hint (ISO-639-1, e.g. 'en'). Default: auto-detect. */
   language?: string;
   /** Hard timeout in seconds (whisper hangs sometimes). Default: 60. */
@@ -99,6 +161,14 @@ export async function transcribe(
 
   ensureCacheDir(options.root);
 
+  const detected = await detectWhisper(options.binary);
+  if (!detected) {
+    logger.warn('No whisper binary found on PATH', {
+      tried: KNOWN_BINARIES.map((b) => b.bin),
+    });
+    return null;
+  }
+
   // Write the audio to a temp file. whisper.cpp doesn't read stdin
   // reliably across formats — file path is the safest interop.
   const tmpDir = tmpdir();
@@ -106,27 +176,60 @@ export async function transcribe(
   const tmpInput = join(tmpDir, `kb-whisper-${hash.slice(0, 12)}.${ext}`);
   writeFileSync(tmpInput, bytes);
 
-  const binary = options.binary ?? 'whisper';
   const model = options.model ?? 'base';
   const timeoutMs = (options.timeoutSeconds ?? DEFAULT_TIMEOUT_S) * 1000;
+  const outputDir = join(options.root, 'data', 'transcripts');
+  const outputPrefix = join(outputDir, `kb-whisper-${hash.slice(0, 12)}`);
 
-  const args: string[] = [
-    tmpInput,
-    '--model', model,
-    '--output_format', 'txt',
-    '--output_dir', join(options.root, 'data', 'transcripts'),
-    '--fp16', 'False',
-  ];
-  if (options.language) args.push('--language', options.language);
+  let args: string[];
+  let resolvedModelPath: string | null = null;
+
+  if (detected.flavour === 'cpp') {
+    resolvedModelPath = resolveCppModelPath(model, options.modelPath);
+    if (!resolvedModelPath) {
+      logger.warn('whisper.cpp model file not found', {
+        searched: [
+          `~/.kyberbot/whisper/ggml-${model}.en.bin`,
+          `~/.kyberbot/whisper/ggml-${model}.bin`,
+          `KYBERBOT_WHISPER_MODEL env var`,
+        ],
+        hint: 'Run: mkdir -p ~/.kyberbot/whisper && curl -L -o ~/.kyberbot/whisper/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin',
+      });
+      try { unlinkSync(tmpInput); } catch { /* ignore */ }
+      return null;
+    }
+    args = [
+      '-m', resolvedModelPath,
+      '-f', tmpInput,
+      '-otxt',
+      '-of', outputPrefix,
+      '-nt',
+      '-np',
+    ];
+    if (options.language) args.push('-l', options.language);
+  } else {
+    // Python openai-whisper CLI
+    args = [
+      tmpInput,
+      '--model', model,
+      '--output_format', 'txt',
+      '--output_dir', outputDir,
+      '--fp16', 'False',
+    ];
+    if (options.language) args.push('--language', options.language);
+  }
+
+  logger.debug('Running whisper', { bin: detected.bin, flavour: detected.flavour, model: resolvedModelPath ?? model });
 
   const start = Date.now();
-  const result = await runWithTimeout(binary, args, timeoutMs);
+  const result = await runWithTimeout(detected.bin, args, timeoutMs);
   const durationMs = Date.now() - start;
 
   try { unlinkSync(tmpInput); } catch { /* best-effort cleanup */ }
 
   if (!result.ok) {
     logger.warn('whisper transcription failed', {
+      bin: detected.bin,
       hash,
       code: result.code,
       signal: result.signal,
@@ -135,14 +238,13 @@ export async function transcribe(
     return null;
   }
 
-  // whisper writes <basename>.txt to --output_dir. We rename to <hash>.txt
-  // so cache hits work next time.
-  const whisperOut = join(
-    options.root,
-    'data',
-    'transcripts',
-    `${tmpInput.split('/').pop()!.replace(/\.[^.]+$/, '')}.txt`,
-  );
+  // Output file location differs by flavour:
+  //   cpp:    <outputPrefix>.txt    (we control the prefix)
+  //   python: <outputDir>/<basename-of-input>.txt
+  const whisperOut = detected.flavour === 'cpp'
+    ? `${outputPrefix}.txt`
+    : join(outputDir, `${tmpInput.split('/').pop()!.replace(/\.[^.]+$/, '')}.txt`);
+
   let text = '';
   try {
     if (existsSync(whisperOut)) {
@@ -211,15 +313,26 @@ function runWithTimeout(cmd: string, args: string[], timeoutMs: number): Promise
 }
 
 /**
- * Quick availability check — true iff `whisper` exists on PATH.
- * Used by onboarding to nudge `brew install whisper-cpp` upfront.
+ * Quick availability check — true iff any supported whisper binary is on
+ * PATH. Used by onboarding and diagnostic commands.
  */
-export async function isTranscribeAvailable(binary = 'whisper'): Promise<boolean> {
-  return new Promise((resolve) => {
-    const proc = spawn(binary, ['--help'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let settled = false;
-    proc.on('error', () => { if (!settled) { settled = true; resolve(false); } });
-    proc.on('close', (code) => { if (!settled) { settled = true; resolve(code === 0); } });
-    setTimeout(() => { if (!settled) { settled = true; try { proc.kill(); } catch {} resolve(false); } }, 3000);
-  });
+export async function isTranscribeAvailable(binary?: string): Promise<boolean> {
+  const detected = await detectWhisper(binary);
+  return detected !== null;
+}
+
+/**
+ * Report which whisper binary + model would be used for the agent at
+ * `root`. Returns null if nothing is ready. For diagnostics.
+ */
+export async function describeTranscribeSetup(opts: { binary?: string; model?: string; modelPath?: string } = {}): Promise<
+  { bin: string; flavour: WhisperFlavour; modelPath?: string; modelReady: boolean } | null
+> {
+  const detected = await detectWhisper(opts.binary);
+  if (!detected) return null;
+  if (detected.flavour === 'cpp') {
+    const modelPath = resolveCppModelPath(opts.model ?? 'base', opts.modelPath);
+    return { bin: detected.bin, flavour: detected.flavour, modelPath: modelPath ?? undefined, modelReady: !!modelPath };
+  }
+  return { bin: detected.bin, flavour: detected.flavour, modelReady: true };
 }
