@@ -36,9 +36,19 @@ type WhisperFlavour = 'cpp' | 'python';
 interface DetectedWhisper { bin: string; flavour: WhisperFlavour; }
 
 const KNOWN_BINARIES: Array<{ bin: string; flavour: WhisperFlavour }> = [
+  // PATH-relative names (tried first — works in normal shells)
   { bin: 'whisper-cli', flavour: 'cpp' },     // homebrew whisper-cpp formula
   { bin: 'whisper-cpp', flavour: 'cpp' },     // hypothetical alt naming
   { bin: 'whisper', flavour: 'python' },      // openai-whisper Python CLI
+  // Absolute paths (fallback when PATH doesn't include brew dirs —
+  // common when kyberbot is launched from a launchd plist or systemd
+  // unit that strips the user's PATH).
+  { bin: '/opt/homebrew/bin/whisper-cli', flavour: 'cpp' },
+  { bin: '/usr/local/bin/whisper-cli', flavour: 'cpp' },
+  { bin: '/opt/homebrew/bin/whisper-cpp', flavour: 'cpp' },
+  { bin: '/usr/local/bin/whisper-cpp', flavour: 'cpp' },
+  { bin: '/opt/homebrew/bin/whisper', flavour: 'python' },
+  { bin: '/usr/local/bin/whisper', flavour: 'python' },
 ];
 
 async function detectWhisper(override?: string): Promise<DetectedWhisper | null> {
