@@ -72,6 +72,60 @@ function binaryExists(bin: string): Promise<boolean> {
   });
 }
 
+const FFMPEG_CANDIDATES = [
+  'ffmpeg',
+  '/opt/homebrew/bin/ffmpeg',  // Apple Silicon brew
+  '/usr/local/bin/ffmpeg',     // Intel brew
+];
+
+async function detectFfmpeg(): Promise<string | null> {
+  for (const cand of FFMPEG_CANDIDATES) {
+    if (await binaryExists(cand)) return cand;
+  }
+  return null;
+}
+
+/**
+ * Convert any audio container/codec to 16kHz mono PCM WAV via ffmpeg.
+ * whisper.cpp's brew build refuses to decode opus-in-ogg (the format
+ * WhatsApp + Telegram both deliver voice notes in), so we run every
+ * non-WAV input through ffmpeg before passing to whisper.
+ */
+function needsFfmpegConversion(mime: string): boolean {
+  const m = mime.toLowerCase();
+  // WAV passes through untouched. Everything else (ogg/opus, m4a/aac,
+  // webm, mp3, mp4, etc.) gets normalised to 16kHz mono PCM WAV for
+  // whisper.cpp's strict input requirements.
+  return !m.includes('wav');
+}
+
+async function convertToWav(input: string, ffmpegBin: string, timeoutMs = 30_000): Promise<string | null> {
+  const out = input.replace(/\.[^.]+$/, '') + '.wav';
+  const args = [
+    '-y',                 // overwrite output
+    '-loglevel', 'error', // suppress info chatter; keep errors on stderr
+    '-i', input,
+    '-ar', '16000',
+    '-ac', '1',
+    '-c:a', 'pcm_s16le',
+    out,
+  ];
+  const result = await runWithTimeout(ffmpegBin, args, timeoutMs);
+  if (!result.ok) {
+    logger.warn('ffmpeg conversion failed', {
+      input,
+      stderr: result.stderr.slice(0, 600),
+      stdout: result.stdout.slice(0, 400),
+    });
+    return null;
+  }
+  if (!existsSync(out)) {
+    logger.warn('ffmpeg returned ok but produced no output file', { input, expected: out });
+    return null;
+  }
+  return out;
+}
+
 /**
  * Resolve the whisper.cpp model file path. Precedence:
  *   1. KYBERBOT_WHISPER_MODEL env var (absolute path or filename)
@@ -193,6 +247,8 @@ export async function transcribe(
 
   let args: string[];
   let resolvedModelPath: string | null = null;
+  let whisperInput = tmpInput;        // input we'll actually hand to whisper
+  let convertedInput: string | null = null; // for cleanup after success
 
   if (detected.flavour === 'cpp') {
     resolvedModelPath = resolveCppModelPath(model, options.modelPath);
@@ -208,9 +264,33 @@ export async function transcribe(
       try { unlinkSync(tmpInput); } catch { /* ignore */ }
       return null;
     }
+
+    // whisper.cpp's brew build can't decode opus-in-ogg (WhatsApp's
+    // default) or m4a/aac (some Telegram clients). Convert anything
+    // non-WAV to 16kHz mono PCM WAV via ffmpeg first.
+    if (needsFfmpegConversion(mime)) {
+      const ffmpegBin = await detectFfmpeg();
+      if (!ffmpegBin) {
+        logger.warn('ffmpeg not found — cannot transcode audio for whisper.cpp', {
+          mime,
+          hint: 'brew install ffmpeg',
+        });
+        try { unlinkSync(tmpInput); } catch { /* ignore */ }
+        return null;
+      }
+      const wav = await convertToWav(tmpInput, ffmpegBin);
+      if (!wav) {
+        try { unlinkSync(tmpInput); } catch { /* ignore */ }
+        return null;
+      }
+      whisperInput = wav;
+      convertedInput = wav;
+      logger.debug('Converted audio to WAV for whisper.cpp', { from: tmpInput, to: wav, mime });
+    }
+
     args = [
       '-m', resolvedModelPath,
-      '-f', tmpInput,
+      '-f', whisperInput,
       '-otxt',
       '-of', outputPrefix,
       '-nt',
@@ -295,8 +375,11 @@ export async function transcribe(
     return null;
   }
 
-  // Success — clean up the temp input now.
+  // Success — clean up the temp input AND the ffmpeg-converted wav.
   try { unlinkSync(tmpInput); } catch { /* ignore */ }
+  if (convertedInput) {
+    try { unlinkSync(convertedInput); } catch { /* ignore */ }
+  }
 
   logger.info('Transcribed audio', { hash, durationMs, chars: text.length });
   return { text, durationMs, cached: false, hash };
