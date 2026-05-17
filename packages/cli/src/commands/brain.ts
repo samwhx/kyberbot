@@ -296,6 +296,18 @@ export function createBrainCommand(): Command {
           console.log(`  Entity Graph:  ${chalk.yellow('[empty]')}`);
         }
 
+        // Cold storage
+        try {
+          const { getColdStats } = await import('../brain/cold-storage.js');
+          const cold = getColdStats(getRoot());
+          if (cold.events > 0) {
+            console.log(`  Cold Storage:  ${chalk.green('[ready]')}`);
+            console.log(chalk.dim(`                 ${cold.events} archived events across ${cold.months} month(s)`));
+          } else {
+            console.log(`  Cold Storage:  ${chalk.dim('[empty]')}`);
+          }
+        } catch { /* non-fatal */ }
+
         console.log('');
       } catch (error) {
         logger.error('Brain status failed', { error: String(error) });
@@ -304,5 +316,62 @@ export function createBrainCommand(): Command {
       }
     });
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // kyberbot brain restore <event-id>
+  // ─────────────────────────────────────────────────────────────────────────
+
+  cmd
+    .command('restore <event-id>')
+    .description('Restore an archived event from cold storage back to the primary timeline')
+    .action(async (eventId: string) => {
+      const id = Number(eventId);
+      if (!Number.isFinite(id) || id <= 0) {
+        console.error(chalk.red(`Invalid event-id: ${eventId}`));
+        process.exit(1);
+      }
+
+      try {
+        const root = getRoot();
+        const { findColdEvent, deleteColdEvent } = await import('../brain/cold-storage.js');
+        const found = findColdEvent(root, id);
+        if (!found) {
+          console.error(chalk.yellow(`No cold event with id ${id} — already in primary, or never archived.`));
+          process.exit(1);
+        }
+
+        const { addToTimeline } = await import('../brain/timeline.js');
+        const e = found.event;
+        await addToTimeline(root, {
+          type: e.type as 'conversation' | 'idea' | 'file' | 'transcript' | 'note' | 'intake',
+          timestamp: e.timestamp,
+          end_timestamp: e.end_timestamp ?? undefined,
+          title: e.title,
+          summary: e.summary ?? '',
+          source_path: e.source_path,
+          entities: safeArray(e.entities_json),
+          topics: safeArray(e.topics_json),
+        });
+
+        deleteColdEvent(root, found.year, found.month, id);
+
+        console.log(chalk.green(`Restored event ${id} from cold/${found.year}-${String(found.month).padStart(2, '0')}.db`));
+        console.log(chalk.dim(`Source: ${e.source_path}`));
+      } catch (err) {
+        logger.error('Brain restore failed', { error: String(err) });
+        console.error(chalk.red(`Error: ${err}`));
+        process.exit(1);
+      }
+    });
+
   return cmd;
+}
+
+function safeArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
 }

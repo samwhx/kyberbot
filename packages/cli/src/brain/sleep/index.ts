@@ -26,6 +26,7 @@ import { runObserveStep, ObserveResult } from './steps/observe.js';
 import { runProfileStep, ProfileResult } from './steps/profile.js';
 import { runReasoningStep, ReasoningResult } from './steps/reasoning.js';
 import { runOutcomeAnnotatorStep, OutcomeAnnotatorResult } from './steps/outcome-annotator.js';
+import { runArchiveStep, ArchiveResult } from './steps/archive.js';
 import { saveCheckpoint } from './utils/checkpoint.js';
 
 const logger = createLogger('sleep-agent');
@@ -42,6 +43,7 @@ export interface RunMetrics {
   profile?: ProfileResult & { durationMs: number };
   entityHygiene?: EntityHygieneResult & { durationMs: number };
   outcomeAnnotator?: OutcomeAnnotatorResult & { durationMs: number };
+  archive?: ArchiveResult & { durationMs: number };
   totalDurationMs: number;
 }
 
@@ -188,6 +190,21 @@ export async function startSleepAgent(
         errors: annotatorResult.errors,
       });
       logger.info('Outcome annotator completed', { runId, heapMB: memMB(), ...metrics.outcomeAnnotator });
+
+      // Step 8: Archive — move tier=archive rows out of primary into
+      // data/cold/YYYY-MM.db so the primary timeline stops growing.
+      // Self-gated by archiveIntervalHours; usually a no-op except once
+      // a week. Phase 1.2.
+      saveCheckpoint(db, runId, 'archive');
+      const archiveStart = Date.now();
+      const archiveResult = await runArchiveStep(root, cfg);
+      metrics.archive = { ...archiveResult, durationMs: Date.now() - archiveStart };
+      recordTelemetry(db, runId, 'archive', {
+        count: archiveResult.count,
+        processed: archiveResult.processed,
+        durationMs: metrics.archive.durationMs,
+      });
+      logger.info('Archive step completed', { runId, heapMB: memMB(), ...metrics.archive });
 
       // Complete run
       const totalDuration = Date.now() - startTime;

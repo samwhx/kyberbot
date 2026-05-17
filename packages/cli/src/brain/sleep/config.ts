@@ -56,6 +56,16 @@ export interface SleepConfig {
 
   enableReasoning: boolean;
   maxReasoningPerRun: number;
+
+  // ── Cold storage (Phase 1.2) ─────────────────────────────────────
+  // Archive step moves tier=archive rows older than archiveMinDays
+  // (and not pinned) out of primary timeline.db into data/cold/YYYY-MM.db
+  // so the primary file stops growing. Runs no more than once per
+  // archiveIntervalHours of agent uptime.
+  enableArchive: boolean;
+  archiveMinDays: number;
+  archiveIntervalHours: number;
+  archiveBatchSize: number;
 }
 
 export const DEFAULT_CONFIG: SleepConfig = {
@@ -115,4 +125,11 @@ export const DEFAULT_CONFIG: SleepConfig = {
 
   enableReasoning: true,
   maxReasoningPerRun: 5,  // Process up to 5 entities per sleep cycle
+
+  // Cold storage defaults — gentle. 90 days of "untouched archive"
+  // before a row moves off the hot path. Runs once a week.
+  enableArchive: true,
+  archiveMinDays: 90,
+  archiveIntervalHours: 24 * 7,
+  archiveBatchSize: 200,
 };

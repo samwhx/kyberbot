@@ -56,6 +56,20 @@ export interface HybridSearchOptions {
   expandQuery?: boolean;
   factFirst?: boolean;  // Use fact-first retrieval instead of chunk-based
   rerank?: boolean;     // default false — enable for user-facing searches
+  /**
+   * Include archived events from data/cold/YYYY-MM.db. Default false —
+   * cold storage is intentionally outside the hot path. Set true for
+   * "search everything I've ever talked about" use cases (e.g. wiki
+   * synthesis, deep retrospectives). Cold matches are LIKE-only and
+   * down-weighted vs primary results.
+   */
+  includeCold?: boolean;
+  /**
+   * Restrict entity-graph traversal to a specific structured edge type.
+   * Lets callers ask "give me only causal predecessors of X" instead
+   * of free-form-string interpretation. Phase 1.5 (mnemon-inspired).
+   */
+  edgeType?: 'temporal' | 'entity' | 'causal' | 'semantic';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -651,6 +665,46 @@ export async function hybridSearch(
     results = addRelatedMemories(results, root);
   }
 
+  // Phase 1.2: optionally append cold-storage matches at the bottom
+  // of the result set. Down-ranked vs primary because cold storage is
+  // LIKE-only and intentionally not on the hot path.
+  if (options.includeCold && results.length < limit) {
+    try {
+      const { searchColdEvents } = await import('./cold-storage.js');
+      const remaining = limit - results.length;
+      const seen = new Set(results.map((r) => r.source_path));
+      const coldRows = searchColdEvents(root, query, {
+        limit: remaining,
+        after: options.after?.toISOString(),
+        before: options.before?.toISOString(),
+      });
+      for (const row of coldRows) {
+        if (seen.has(row.source_path)) continue;
+        seen.add(row.source_path);
+        results.push({
+          id: `cold:${row.id}`,
+          title: row.title,
+          content: row.summary ?? '',
+          source_path: row.source_path,
+          timestamp: row.timestamp,
+          type: row.type,
+          tier: 'archive',
+          priority: row.priority ?? 0,
+          tags: safeJsonArray(row.tags_json),
+          // Cold matches don't have a semantic score; surface them as
+          // weak keyword hits so re-ranking + caller filtering still work.
+          semanticScore: 0,
+          metadataScore: 0.1,
+          hybridScore: 0.1,
+          matchType: 'keyword',
+        });
+        if (results.length >= limit) break;
+      }
+    } catch (err) {
+      logger.warn('Cold-storage search failed; primary results returned', { error: String(err) });
+    }
+  }
+
   logger.debug('Hybrid search completed', {
     semanticCount: semanticResults.length,
     metadataCount: metadataResults.length,
@@ -659,9 +713,20 @@ export async function hybridSearch(
     fusedCount: fused.size,
     resultCount: results.length,
     reranked: rerank,
+    includeCold: options.includeCold,
   });
 
   return results;
+}
+
+function safeJsonArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
