@@ -141,6 +141,9 @@ export function createRunCommand(): Command {
         // Initialize monitoring (Sentry, process error handlers)
         await initMonitoring();
 
+        // Show splash screen
+        displaySplash(root);
+
         // Initialize the warm Claude subprocess pool when enabled.
         // Without this, channel handlers see warmPoolKey set and the
         // claude.ts adapter silently falls back to a one-shot
@@ -148,6 +151,10 @@ export function createRunCommand(): Command {
         // calls this for fleet mode; the single-agent path needed its
         // own call site. The pool itself logs "warm Claude pool
         // initialized" on success.
+        //
+        // Placed *after* the splash so the boot log line is visible in
+        // the terminal output rather than scrolling off above the
+        // banner.
         try {
           const { isWarmPoolEnabled, initWarmPool } = await import('../runtime/warm-claude-pool.js');
           const { getIdentity } = await import('../config.js');
@@ -163,9 +170,6 @@ export function createRunCommand(): Command {
           const { createLogger } = await import('../logger.js');
           createLogger('warm-pool').warn('init failed; falling back to one-shot subprocess', { error: String(err) });
         }
-
-        // Show splash screen
-        displaySplash(root);
 
         // ─────────────────────────────────────────────────────────────
         // Service 1: ChromaDB check
