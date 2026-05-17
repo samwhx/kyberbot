@@ -244,6 +244,122 @@ export function isChromaAvailable(): boolean {
 }
 
 /**
+ * Get the active per-agent collection name (for the *currently configured*
+ * embedder). Surface so callers can ask "what collection am I writing to
+ * right now?" without re-importing the internal namer.
+ */
+export function getActiveCollectionName(root?: string): string {
+  return getCollectionNameForRoot(root);
+}
+
+/**
+ * Reindex every document in a source ChromaDB collection into a
+ * destination collection, re-running embedding via whatever embedder
+ * the destination was created with. Reads in pages so large stores
+ * don't blow the heap; reports progress via the callback.
+ *
+ * Typical use case: switching embedders (e.g. OpenAI → Ollama) creates
+ * a fresh empty collection — this fills it from the previous one so
+ * search still hits historical conversations.
+ */
+export async function reindexCollection(
+  sourceName: string,
+  destName: string,
+  opts: {
+    batchSize?: number;
+    onProgress?: (state: { copied: number; total: number; batch: number }) => void;
+    dryRun?: boolean;
+  } = {},
+): Promise<{ copied: number; total: number; skipped: number }> {
+  if (!chromaClient) {
+    // Force init by touching the singleton. Pass a synthetic root that
+    // produces the same default behaviour as a normal startup.
+    await initializeEmbeddings();
+  }
+  if (!chromaClient) throw new Error('ChromaDB client not available');
+
+  const batchSize = opts.batchSize ?? 50;
+
+  // For SOURCE we don't need to embed anything (we're just reading). A
+  // no-op embedding function avoids the JS client's default
+  // openai-text-embedding-ada-002 placeholder, which would try to
+  // resolve an OpenAI key we may have removed.
+  const noopEmbedder: IEmbeddingFunction = {
+    generate: async () => { throw new Error('source collection should never embed'); },
+  };
+
+  const source = await chromaClient.getCollection({ name: sourceName, embeddingFunction: noopEmbedder });
+  const total = await source.count();
+  if (total === 0) {
+    return { copied: 0, total: 0, skipped: 0 };
+  }
+
+  // DEST uses the agent's configured embedder so add() will auto-embed
+  // via Ollama / OpenAI / whatever is current.
+  const destEmbedder: IEmbeddingFunction = {
+    generate: async (texts: string[]) => generateEmbeddings(texts),
+  };
+  const dest = await chromaClient.getOrCreateCollection({
+    name: destName,
+    embeddingFunction: destEmbedder,
+    metadata: {
+      description: 'KyberBot semantic search index',
+      'hnsw:space': 'cosine',
+      'hnsw:M': 32,
+      'hnsw:construction_ef': 200,
+      'hnsw:search_ef': 100,
+    },
+  });
+
+  let copied = 0;
+  let skipped = 0;
+  let batch = 0;
+  const existingIds = new Set<string>();
+
+  // Capture the destination's existing ids so we don't duplicate on
+  // resume. Cheap because dest is typically empty at start of reindex.
+  if (!opts.dryRun) {
+    try {
+      const existing = await dest.get({ limit: 100_000 });
+      if (existing.ids) for (const id of existing.ids) existingIds.add(id);
+    } catch {
+      // get() may fail on empty collections in some chroma versions — ignore.
+    }
+  }
+
+  let offset = 0;
+  while (offset < total) {
+    const page = await source.get({ limit: batchSize, offset });
+    if (!page.ids || page.ids.length === 0) break;
+
+    const ids: string[] = [];
+    const documents: string[] = [];
+    const metadatas: Record<string, string | number | boolean>[] = [];
+
+    for (let i = 0; i < page.ids.length; i++) {
+      const id = page.ids[i];
+      if (existingIds.has(id)) { skipped++; continue; }
+      const doc = (page.documents?.[i] ?? '') as string;
+      if (!doc) { skipped++; continue; }
+      ids.push(id);
+      documents.push(doc);
+      metadatas.push((page.metadatas?.[i] ?? {}) as Record<string, string | number | boolean>);
+    }
+
+    if (ids.length > 0 && !opts.dryRun) {
+      await dest.add({ ids, documents, metadatas });
+    }
+    copied += ids.length;
+
+    batch++;
+    opts.onProgress?.({ copied, total, batch });
+    offset += page.ids.length;
+  }
+
+  return { copied, total, skipped };
+}
+
+/**
  * Reset the embeddings singleton state so the next call to initializeEmbeddings()
  * will re-establish connections. Used by the benchmark harness to reset between
  * conversations after deleting the ChromaDB collection.

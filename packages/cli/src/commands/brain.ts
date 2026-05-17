@@ -363,6 +363,79 @@ export function createBrainCommand(): Command {
       }
     });
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // kyberbot brain reindex
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // Re-embed all documents from one ChromaDB collection into another.
+  // Use case: you switched embedders (e.g. brain.embedder: openai →
+  // ollama in identity.yaml) and want historical conversations to
+  // re-appear in semantic search via the new collection.
+
+  cmd
+    .command('reindex')
+    .description('Re-embed all documents from one ChromaDB collection into another (e.g. after switching embedders)')
+    .option('--from <name>', 'Source collection name (defaults to the openai-flavored sibling of the current collection)')
+    .option('--to <name>', 'Destination collection name (defaults to the currently-active collection)')
+    .option('--batch <n>', 'Batch size for pagination', '50')
+    .option('--dry-run', 'Show what would be moved without writing', false)
+    .action(async (opts: { from?: string; to?: string; batch: string; dryRun: boolean }) => {
+      try {
+        const root = getRoot();
+        const { getActiveCollectionName, reindexCollection } = await import('../brain/embeddings.js');
+
+        const dest = opts.to ?? getActiveCollectionName(root);
+
+        // If --from is unspecified, infer the previous embedder's collection
+        // name by stripping the trailing _<embedder> suffix. Today the only
+        // active suffix is _ollama; older runs landed in the bare name.
+        let src = opts.from;
+        if (!src) {
+          const stripped = dest.replace(/_(ollama|openai)$/, '');
+          src = stripped === dest ? `${dest}_openai` : stripped;
+        }
+
+        if (src === dest) {
+          console.error(chalk.red(`Source and destination are the same: ${src}`));
+          process.exit(1);
+        }
+
+        const batchSize = Number(opts.batch);
+        if (!Number.isFinite(batchSize) || batchSize < 1) {
+          console.error(chalk.red('--batch must be a positive integer'));
+          process.exit(1);
+        }
+
+        console.log(chalk.bold(`\nReindex ${chalk.cyan(src)} → ${chalk.cyan(dest)}${opts.dryRun ? chalk.dim(' (dry-run)') : ''}\n`));
+
+        const result = await reindexCollection(src, dest, {
+          batchSize,
+          dryRun: opts.dryRun,
+          onProgress: ({ copied, total, batch }) => {
+            const pct = total > 0 ? Math.round((copied / total) * 100) : 0;
+            process.stdout.write(`\r  batch ${batch}: ${copied}/${total} (${pct}%)`);
+          },
+        });
+        process.stdout.write('\n');
+
+        if (result.total === 0) {
+          console.log(chalk.yellow(`Source collection '${src}' is empty — nothing to reindex.`));
+          return;
+        }
+
+        if (opts.dryRun) {
+          console.log(chalk.green(`\nDry-run: would copy ${result.copied} doc(s), skip ${result.skipped} (already present or empty body).`));
+        } else {
+          console.log(chalk.green(`\nDone. Copied ${result.copied} doc(s); skipped ${result.skipped} (already present or empty body).`));
+          console.log(chalk.dim(`Source collection left untouched. Drop it manually with the chromadb CLI if you want.`));
+        }
+      } catch (err) {
+        logger.error('Brain reindex failed', { error: String(err) });
+        console.error(chalk.red(`\nError: ${err instanceof Error ? err.message : String(err)}`));
+        process.exit(1);
+      }
+    });
+
   return cmd;
 }
 
