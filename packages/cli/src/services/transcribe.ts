@@ -229,13 +229,22 @@ export async function transcribe(
     if (options.language) args.push('--language', options.language);
   }
 
-  logger.debug('Running whisper', { bin: detected.bin, flavour: detected.flavour, model: resolvedModelPath ?? model });
+  logger.info('Running whisper', {
+    bin: detected.bin,
+    flavour: detected.flavour,
+    model: resolvedModelPath ?? model,
+    input: tmpInput,
+    inputBytes: bytes.length,
+    inputMime: mime,
+    outputPrefix,
+  });
 
   const start = Date.now();
   const result = await runWithTimeout(detected.bin, args, timeoutMs);
   const durationMs = Date.now() - start;
 
-  try { unlinkSync(tmpInput); } catch { /* best-effort cleanup */ }
+  // Don't delete the input file yet — keep for debugging if we got no
+  // output. Cleaned at the very end on success.
 
   if (!result.ok) {
     logger.warn('whisper transcription failed', {
@@ -243,7 +252,9 @@ export async function transcribe(
       hash,
       code: result.code,
       signal: result.signal,
-      stderr: result.stderr.slice(0, 300),
+      stderr: result.stderr.slice(0, 800),
+      stdout: result.stdout.slice(0, 400),
+      inputKept: tmpInput,
     });
     return null;
   }
@@ -272,9 +283,20 @@ export async function transcribe(
   }
 
   if (text.length === 0) {
-    logger.debug('whisper produced empty transcript', { hash, durationMs });
+    logger.warn('whisper produced empty transcript', {
+      hash,
+      durationMs,
+      expectedOutput: whisperOut,
+      outputExists: existsSync(whisperOut),
+      stdoutHead: result.stdout.slice(0, 400),
+      stderrHead: result.stderr.slice(0, 800),
+      inputKept: tmpInput,
+    });
     return null;
   }
+
+  // Success — clean up the temp input now.
+  try { unlinkSync(tmpInput); } catch { /* ignore */ }
 
   logger.info('Transcribed audio', { hash, durationMs, chars: text.length });
   return { text, durationMs, cached: false, hash };
