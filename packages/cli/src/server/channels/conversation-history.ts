@@ -5,12 +5,19 @@
  * messaging channels (Telegram, WhatsApp) are stateful. The history
  * is prepended to each prompt so Claude has context from prior exchanges.
  *
- * History lives in memory — it persists across messages within a session
- * but resets on restart. Long-term memory is handled by storeConversation()
- * and the brain subsystems.
+ * Backed by an in-memory Map for fast access on the hot path, with
+ * write-through persistence to messages.db once the channel module calls
+ * `enableHistoryPersistence(root)`. On the first read or push for a
+ * given conversation after agent restart, the buffer is hydrated from
+ * disk so prior exchanges aren't lost.
+ *
+ * Long-term memory (semantic + entity graph) is still handled by
+ * storeConversation() and the brain subsystems — this layer is just for
+ * the rolling per-conversation transcript.
  */
 
 import { createLogger } from '../../logger.js';
+import { saveMessage, getRecentMessagesForSession } from '../../brain/messages.js';
 
 const logger = createLogger('history');
 
@@ -26,23 +33,103 @@ const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours — older messages are stale
 // Per-conversation histories, keyed by a stable identifier (chat ID, JID, etc.)
 const histories = new Map<string, HistoryEntry[]>();
 
+// Persistence config — set once per process by the channel runtime.
+// When set, every push is written through to messages.db, and a
+// conversation is lazily hydrated from disk on first read.
+let persistenceRoot: string | null = null;
+const hydratedConversations = new Set<string>();
+
+/**
+ * Enable write-through persistence to messages.db for all subsequent
+ * pushes and lazy-hydrate on first read. Called once during channel
+ * runtime startup so the rolling history survives agent restarts.
+ */
+export function enableHistoryPersistence(root: string): void {
+  persistenceRoot = root;
+  logger.info('Channel history persistence enabled', { root });
+}
+
+/**
+ * Hydrate a conversation's rolling buffer from messages.db if it hasn't
+ * been hydrated yet in this process. Safe to call repeatedly — does
+ * nothing after the first hydration. No-op when persistence is disabled.
+ */
+function ensureHydrated(conversationId: string): void {
+  if (!persistenceRoot) return;
+  if (hydratedConversations.has(conversationId)) return;
+  hydratedConversations.add(conversationId);
+
+  try {
+    const since = Date.now() - MAX_AGE_MS;
+    const rows = getRecentMessagesForSession(persistenceRoot, conversationId, since);
+    if (rows.length === 0) return;
+
+    const history = getOrCreateHistory(conversationId);
+    // Splice disk-loaded rows in *front* of anything we may have already
+    // pushed in-memory this session (shouldn't normally happen, but safe).
+    const restored: HistoryEntry[] = rows
+      .filter((r) => r.role === 'user' || r.role === 'assistant')
+      .map((r) => ({
+        role: r.role as 'user' | 'assistant',
+        content: r.content,
+        timestamp: new Date(r.created_at).getTime(),
+      }));
+    history.unshift(...restored);
+    trim(conversationId);
+    logger.debug('Hydrated conversation from disk', { conversationId, restored: restored.length });
+  } catch (err) {
+    // Persistence is best-effort — never let it break the channel reply.
+    logger.warn('Hydration failed; continuing with in-memory only', {
+      conversationId,
+      error: String(err),
+    });
+  }
+}
+
+function inferChannelFromConvoId(conversationId: string): string {
+  const idx = conversationId.indexOf(':');
+  return idx > 0 ? conversationId.slice(0, idx) : 'channel';
+}
+
+function writeThrough(conversationId: string, role: 'user' | 'assistant', content: string): void {
+  if (!persistenceRoot) return;
+  try {
+    saveMessage(persistenceRoot, conversationId, role, content);
+  } catch (err) {
+    logger.warn('Write-through to messages.db failed; in-memory still updated', {
+      conversationId,
+      role,
+      error: String(err),
+    });
+  }
+}
+
 /**
  * Add a user message to the conversation history.
  */
 export function pushUserMessage(conversationId: string, content: string): void {
+  ensureHydrated(conversationId);
   const history = getOrCreateHistory(conversationId);
   history.push({ role: 'user', content, timestamp: Date.now() });
   trim(conversationId);
+  writeThrough(conversationId, 'user', content);
 }
 
 /**
  * Add an assistant response to the conversation history.
  */
 export function pushAssistantMessage(conversationId: string, content: string): void {
+  ensureHydrated(conversationId);
   const history = getOrCreateHistory(conversationId);
   history.push({ role: 'assistant', content, timestamp: Date.now() });
   trim(conversationId);
+  writeThrough(conversationId, 'assistant', content);
 }
+
+// Channel marker reserved for use by future helpers that need to know
+// where a stored session came from (Telegram vs WhatsApp). Kept here so
+// the convention stays alongside its consumers.
+void inferChannelFromConvoId;
 
 /**
  * Render just the <conversation_history>...</conversation_history> block for
@@ -53,6 +140,7 @@ export function pushAssistantMessage(conversationId: string, content: string): v
  * The block has no trailing newline; callers add separators as needed.
  */
 export function buildHistoryBlock(conversationId: string): string {
+  ensureHydrated(conversationId);
   const history = getOrCreateHistory(conversationId);
   const cutoff = Date.now() - MAX_AGE_MS;
   const recent = history.filter(e => e.timestamp >= cutoff);

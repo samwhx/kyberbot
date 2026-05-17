@@ -65,6 +65,13 @@ export async function startServer(options: {
     try {
       const identity = getIdentity();
 
+      // Wire channel-history write-through + lazy hydration to messages.db
+      // so per-conversation rolling history survives agent restarts.
+      // Safe to call unconditionally — the module no-ops until both
+      // channels and persistence are configured.
+      const { enableHistoryPersistence } = await import('./channels/conversation-history.js');
+      enableHistoryPersistence(root);
+
       const tgToken = process.env.TELEGRAM_BOT_TOKEN || identity.channels?.telegram?.bot_token;
       if (tgToken) {
         const tgConfig = { ...(identity.channels?.telegram ?? {}), bot_token: tgToken };
