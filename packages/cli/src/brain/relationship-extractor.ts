@@ -200,7 +200,7 @@ export function formatRelationship(
   relationship: RelationshipType,
   direction: 'outgoing' | 'incoming'
 ): string {
-  const formats: Record<RelationshipType, { outgoing: string; incoming: string }> = {
+  const formats: Partial<Record<RelationshipType, { outgoing: string; incoming: string }>> = {
     founded: { outgoing: 'founded', incoming: 'was founded by' },
     works_at: { outgoing: 'works at', incoming: 'employs' },
     invested_in: { outgoing: 'invested in', incoming: 'received investment from' },
@@ -216,8 +216,19 @@ export function formatRelationship(
     uses: { outgoing: 'uses', incoming: 'is used by' },
     depends_on: { outgoing: 'depends on', incoming: 'is dependency of' },
     part_of: { outgoing: 'is part of', incoming: 'contains' },
+    // Phase 1.5 — structured edges (mnemon-style). Default outgoing/
+    // incoming phrasings; the recall renderer can still pick its own.
+    caused: { outgoing: 'caused', incoming: 'was caused by' },
+    triggered: { outgoing: 'triggered', incoming: 'was triggered by' },
+    led_to: { outgoing: 'led to', incoming: 'was preceded by' },
+    prevented: { outgoing: 'prevented', incoming: 'was prevented by' },
+    before: { outgoing: 'happened before', incoming: 'happened after' },
+    after: { outgoing: 'happened after', incoming: 'happened before' },
+    superseded_by: { outgoing: 'was superseded by', incoming: 'superseded' },
+    similar_to: { outgoing: 'similar to', incoming: 'similar to' },
+    analogous_to: { outgoing: 'analogous to', incoming: 'analogous to' },
   };
 
-  const format = formats[relationship] || formats['related_to'];
+  const format = formats[relationship] ?? formats['related_to']!;
   return direction === 'outgoing' ? format.outgoing : format.incoming;
 }

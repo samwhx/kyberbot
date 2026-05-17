@@ -60,7 +60,37 @@ export type RelationshipType =
   | 'reports_to'
   | 'uses'
   | 'depends_on'
-  | 'part_of';
+  | 'part_of'
+  | 'caused'
+  | 'triggered'
+  | 'led_to'
+  | 'prevented'
+  | 'before'
+  | 'after'
+  | 'superseded_by'
+  | 'similar_to'
+  | 'analogous_to';
+
+/**
+ * Structured edge category (Phase 1.5, ported from mnemon's design).
+ * Lets the agent reason about causal chains or temporal sequences
+ * without re-interpreting free-form `relationship` strings each time.
+ */
+export type EdgeType = 'temporal' | 'entity' | 'causal' | 'semantic';
+
+/**
+ * Map a free-form `relationship` string to one of the four edge_type
+ * buckets. Defaults to `entity` for anything unknown — the safe
+ * bucket: implies "a structured relationship between two entities".
+ */
+export function classifyEdgeType(relationship: string | null | undefined): EdgeType {
+  if (!relationship) return 'entity';
+  const r = relationship.toLowerCase();
+  if (r === 'caused' || r === 'triggered' || r === 'led_to' || r === 'prevented' || r === 'led to' || r === 'caused_by') return 'causal';
+  if (r === 'before' || r === 'after' || r === 'during' || r === 'superseded_by' || r === 'superseded by') return 'temporal';
+  if (r === 'similar_to' || r === 'analogous_to' || r === 'cluster_member' || r === 'related_to' || r === 'discussed' || r === 'co-occurred') return 'semantic';
+  return 'entity';
+}
 
 export interface EntityRelation {
   source_id: number;
@@ -294,6 +324,29 @@ const ENTITY_GRAPH_MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 9,
+    description: 'Phase 1.5 — structured edge_type column on entity_relations + backfill',
+    up: (db) => {
+      addColumnIfMissing(db, 'entity_relations', 'edge_type',
+        "TEXT CHECK (edge_type IN ('temporal','entity','causal','semantic'))");
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_relations_edge_type ON entity_relations(edge_type, source_id);`);
+      // Backfill — classify existing rows from the `relationship` string.
+      db.exec(`
+        UPDATE entity_relations SET edge_type = 'causal'
+          WHERE edge_type IS NULL AND lower(relationship) IN
+            ('caused','triggered','led_to','prevented','caused_by','led to');
+        UPDATE entity_relations SET edge_type = 'temporal'
+          WHERE edge_type IS NULL AND lower(relationship) IN
+            ('before','after','during','superseded_by','superseded by');
+        UPDATE entity_relations SET edge_type = 'semantic'
+          WHERE edge_type IS NULL AND lower(relationship) IN
+            ('co-occurred','related_to','discussed','similar_to','analogous_to','cluster_member');
+        UPDATE entity_relations SET edge_type = 'entity'
+          WHERE edge_type IS NULL;
+      `);
+    },
+  },
 ];
 
 export async function getEntityGraphDb(root: string): Promise<Database.Database> {
@@ -349,8 +402,8 @@ export async function mergeEntities(
         ).run(rel.strength, rel.confidence || 0.5, keepId, targetId);
       } else {
         database.prepare(
-          'INSERT INTO entity_relations (source_id, target_id, relationship, strength, confidence, method, rationale) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        ).run(keepId, targetId, rel.relationship, rel.strength, rel.confidence || 0.5, rel.method || 'merged', rel.rationale);
+          'INSERT INTO entity_relations (source_id, target_id, relationship, strength, confidence, method, rationale, edge_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        ).run(keepId, targetId, rel.relationship, rel.strength, rel.confidence || 0.5, rel.method || 'merged', rel.rationale, classifyEdgeType(rel.relationship));
         relationsMoved++;
       }
     }
@@ -374,8 +427,8 @@ export async function mergeEntities(
         ).run(rel.strength, rel.confidence || 0.5, sourceId, keepId);
       } else {
         database.prepare(
-          'INSERT INTO entity_relations (source_id, target_id, relationship, strength, confidence, method, rationale) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        ).run(sourceId, keepId, rel.relationship, rel.strength, rel.confidence || 0.5, rel.method || 'merged', rel.rationale);
+          'INSERT INTO entity_relations (source_id, target_id, relationship, strength, confidence, method, rationale, edge_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        ).run(sourceId, keepId, rel.relationship, rel.strength, rel.confidence || 0.5, rel.method || 'merged', rel.rationale, classifyEdgeType(rel.relationship));
         relationsMoved++;
       }
     }
@@ -593,11 +646,11 @@ export async function linkEntities(
 
   database
     .prepare(
-      `INSERT INTO entity_relations (source_id, target_id, relationship, strength)
-       VALUES (?, ?, ?, 1)
+      `INSERT INTO entity_relations (source_id, target_id, relationship, strength, edge_type)
+       VALUES (?, ?, ?, 1, ?)
        ON CONFLICT(source_id, target_id) DO UPDATE SET strength = strength + 1`
     )
-    .run(id1, id2, relationship);
+    .run(id1, id2, relationship, classifyEdgeType(relationship));
 }
 
 export async function linkEntitiesWithType(
@@ -628,8 +681,8 @@ export async function linkEntitiesWithType(
 
   database
     .prepare(
-      `INSERT INTO entity_relations (source_id, target_id, relationship, strength, confidence, method, rationale, last_verified)
-       VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+      `INSERT INTO entity_relations (source_id, target_id, relationship, strength, confidence, method, rationale, last_verified, edge_type)
+       VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
        ON CONFLICT(source_id, target_id) DO UPDATE SET
          relationship = CASE
            WHEN excluded.confidence > entity_relations.confidence THEN excluded.relationship
@@ -638,15 +691,85 @@ export async function linkEntitiesWithType(
          strength = strength + 1,
          confidence = MAX(entity_relations.confidence, excluded.confidence),
          rationale = COALESCE(excluded.rationale, entity_relations.rationale),
-         last_verified = excluded.last_verified`
+         last_verified = excluded.last_verified,
+         edge_type = CASE
+           WHEN excluded.confidence > entity_relations.confidence THEN excluded.edge_type
+           ELSE entity_relations.edge_type
+         END`
     )
-    .run(id1, id2, options.relationship, confidence, method, options.rationale || null, now);
+    .run(id1, id2, options.relationship, confidence, method, options.rationale || null, now, classifyEdgeType(options.relationship));
 
   logger.debug(`Linked entities with type: ${options.relationship}`, {
     sourceId: id1,
     targetId: id2,
     confidence,
   });
+}
+
+/**
+ * Phase 1.5 (mnemon-inspired) — return every edge connected to
+ * `entityId` whose structured `edge_type` matches the requested
+ * category. Used for queries like "give me all causal predecessors
+ * of X". Returns the connected entity, the relationship verb, the
+ * traversal direction, and the edge_type for completeness.
+ */
+export async function getRelationsByEdgeType(
+  root: string,
+  entityId: number,
+  edgeType: EdgeType,
+): Promise<Array<{
+  entity: Entity;
+  relationship: string;
+  edge_type: EdgeType;
+  direction: 'outgoing' | 'incoming';
+  confidence: number;
+}>> {
+  const database = await ensureDatabase(root);
+
+  const rows = database.prepare(`
+    SELECT
+      er.source_id,
+      er.target_id,
+      er.relationship,
+      er.edge_type,
+      er.confidence,
+      e.id, e.name, e.normalized_name, e.type, e.aliases
+    FROM entity_relations er
+    JOIN entities e ON (
+      CASE WHEN er.source_id = ? THEN er.target_id ELSE er.source_id END = e.id
+    )
+    WHERE (er.source_id = ? OR er.target_id = ?)
+      AND er.edge_type = ?
+    ORDER BY er.confidence DESC, er.strength DESC
+  `).all(entityId, entityId, entityId, edgeType) as Array<{
+    source_id: number;
+    target_id: number;
+    relationship: string;
+    edge_type: EdgeType;
+    confidence: number;
+    id: number;
+    name: string;
+    normalized_name: string;
+    type: EntityType;
+    aliases: string;
+  }>;
+
+  return rows.map((r) => ({
+    entity: {
+      id: r.id,
+      name: r.name,
+      normalized_name: r.normalized_name,
+      aliases: JSON.parse(r.aliases || '[]'),
+      type: r.type,
+      first_seen: '',
+      last_seen: '',
+      mention_count: 0,
+    },
+    relationship: r.relationship,
+    edge_type: r.edge_type,
+    direction: r.source_id === entityId ? 'outgoing' : 'incoming',
+    confidence: r.confidence,
+  }));
 }
 
 export async function getTypedRelationships(
